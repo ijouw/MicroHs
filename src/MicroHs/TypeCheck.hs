@@ -1434,6 +1434,22 @@ expandInst dinst@(Instance
       Just x -> return x
 
   -- hanlde methods
+  let (instBind, args) = addInstForClass bs qiCls loc mits supers
+
+  -- bound method not used in types
+  case filter (not . instBind) bs of
+    [] -> return ()
+    b:_ -> tcError (getSLoc b) "superflous instance binding"
+
+  -- todo: check for overlaps in method-class correspondence
+
+  -- class body
+  addInst iInst vks ctx cc fds dinst extra qiCls args
+  -- ignore non-instance
+expandInst d = return [d]
+
+addInstForClass :: [EDef] -> Ident -> SLoc -> [(Ident, EType)] -> [a] -> (EDef -> Bool, [Expr])
+addInstForClass bs qiCls loc mits supers = 
       -- signatures of methods
   let signs = [ (i, t) | Sign is t <- bs, i <- is ]
       addSign i e = maybe e (ESign e) $ lookup i signs
@@ -1455,17 +1471,8 @@ expandInst dinst@(Instance
       mkDefault i t = ELam loc [Eqn vs $ simpleAlts $ eApps (EVar dfltId) vs]
         where dfltId = setSLocIdent loc $ mkDefaultMethodId $ qualIdent clsMdl i
               vs = [EVar $ mkIdentSLoc loc $ "$" ++ show k | k <- [0 .. countArrows t - 1] ]
-  -- bound method not used in types
-  case filter (not . instBind) bs of
-    [] -> return ()
-    b:_ -> tcError (getSLoc b) "superflous instance binding"
+   in (instBind, args)
 
-  -- todo: check for overlaps in method-class correspondence
-
-  -- class body
-  addInst iInst vks ctx cc fds dinst extra qiCls args
-  -- ignore non-instance
-expandInst d = return [d]
 
 addInst :: Ident -> [IdKind] -> [EConstraint] -> EType -> [IFunDep] -> EDef -> [EBind] -> Ident -> [Expr] -> T [EDef]
 addInst iInst vks ctx cc fds dinst extra qiCls args = do

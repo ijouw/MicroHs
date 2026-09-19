@@ -1412,27 +1412,39 @@ splitContext act =
 -- So any generated type expressions must be kind correct and fully qualified,
 -- whereas value expressions do not.
 expandInst :: EDef -> T [EDef]
-expandInst dinst@(Instance act bs extra) = do
+expandInst dinst@(Instance
+    act -- constraint
+    bs -- methods
+    extra
+  ) = do
+  -- ctx => cc
   (vks, ctx, cc) <- splitContext <$> expandSyn act
   let loc = getSLoc act
       qiCls = getAppCon cc
+      -- instance identifier
       iInst = mkInstId loc cc
 --  tcTrace ("expandInst " ++ show iInst)
 --  (e, _) <- tLookupV iCls
   ct <- gets classTable
 --  let qiCls = getAppCon e
+  -- Lookup known class: supers => _ | fds where mits
   (ClassInfo _ supers _ mits fds) <-
     case M.lookup qiCls ct of
       Nothing -> tcError loc $ "not a class " ++ showIdent qiCls
       Just x -> return x
+
+  -- hanlde methods
+      -- signatures of methods
   let signs = [ (i, t) | Sign is t <- bs, i <- is ]
       addSign i e = maybe e (ESign e) $ lookup i signs
       clsMdl = qualOf qiCls                   -- get class's module name
+      -- definitions of methods
       ies = [(i, addSign i $ ELam loc qs) | Fcn i qs <- bs]
       meth (i, t) = fromMaybe (mkDefault i t) $ lookup i ies
       meths = map meth mits
       sups = map (const (EVar $ mkIdentSLoc loc dictPrefixDollar)) supers
       args = sups ++ meths
+      -- are identifiers bound
       instBind (Fcn i _) = isJust $ lookup i mits
       instBind (Sign is _) = all (\ i -> isJust $ lookup i mits) is
       instBind _ = False
@@ -1443,17 +1455,29 @@ expandInst dinst@(Instance act bs extra) = do
       mkDefault i t = ELam loc [Eqn vs $ simpleAlts $ eApps (EVar dfltId) vs]
         where dfltId = setSLocIdent loc $ mkDefaultMethodId $ qualIdent clsMdl i
               vs = [EVar $ mkIdentSLoc loc $ "$" ++ show k | k <- [0 .. countArrows t - 1] ]
+  -- bound method not used in types
   case filter (not . instBind) bs of
     [] -> return ()
     b:_ -> tcError (getSLoc b) "superflous instance binding"
 
+  -- todo: check for overlaps in method-class correspondence
+
+  -- class body
+  addInst iInst vks ctx cc fds dinst extra qiCls args
+  -- ignore non-instance
+expandInst d = return [d]
+
+addInst :: Ident -> [IdKind] -> [EConstraint] -> EType -> [IFunDep] -> EDef -> [EBind] -> Ident -> [Expr] -> T [EDef]
+addInst iInst vks ctx cc fds dinst extra qiCls args = do
+      -- given extra, apply class constructor qiCls to args
   let body = eEqns [] $ eLetB extra $ eApps (EVar $ mkClassConstructor qiCls) args
+      -- name it iInst
       bind = Fcn iInst body
+      -- give it a type
       sign = Sign [iInst] $ eForall vks $ addConstraints ctx cc
   addInstTable [(EVar iInst, vks, ctx, cc, fds)]
   return [dinst, sign, bind]
 
-expandInst d = return [d]
 
 ---------------------
 

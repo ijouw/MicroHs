@@ -1425,9 +1425,10 @@ expandInst dinst@(Instance
     extra
   ) = do
   ct <- gets classTable
-  -- [(vks, ctx => cc)]
-  classes <- fmap splitContext <$> expandTup act
-  (instBinds, declss) <- unzip <$> forM classes (\(vks, ctx, cc) -> do
+  -- ctx => [cc]
+  let (vks, ctx, classes') = splitContext act
+  classes <- expandTup classes'
+  (instBinds, declss) <- unzip <$> forM classes (\cc -> do
     let loc = getSLoc act
         qiCls = getAppCon cc
         -- instance identifier

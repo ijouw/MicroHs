@@ -76,5 +76,5 @@ main = do
   print $ h (5::Int) 'a'
   print $ f [88::Int]
   print $ f (1::Int, 'a')
-  print $ (a ('a'::Char) :: Char)
-  print $ e ('b'::Char)
+  print (a ('a'::Char)::Char)
+  print (e ('b'::Char)::Char)

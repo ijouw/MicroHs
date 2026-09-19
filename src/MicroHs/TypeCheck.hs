@@ -1427,6 +1427,7 @@ expandInst dinst@(Instance
 --  (e, _) <- tLookupV iCls
   ct <- gets classTable
 --  let qiCls = getAppCon e
+
   -- Lookup known class: supers => _ | fds where mits
   (ClassInfo _ supers _ mits fds) <-
     case M.lookup qiCls ct of
@@ -1436,7 +1437,7 @@ expandInst dinst@(Instance
   -- hanlde methods
   let args = getClassArgs bs qiCls loc mits supers
 
-  -- bound method not used in types
+  -- bound method not declared in class
   case filter (not . instBind mits) bs of
     [] -> return ()
     b:_ -> tcError (getSLoc b) "superflous instance binding"
@@ -1458,24 +1459,24 @@ instBind mits = go
 
 getClassArgs :: [EDef] -> Ident -> SLoc -> [(Ident, EType)] -> [a] -> [Expr]
 getClassArgs bs qiCls loc mits supers = 
-      -- signatures of methods
-  let signs = [ (i, t) | Sign is t <- bs, i <- is ]
-      addSign i e = maybe e (ESign e) $ lookup i signs
-      clsMdl = qualOf qiCls                   -- get class's module name
-      -- definitions of methods
-      ies = [(i, addSign i $ ELam loc qs) | Fcn i qs <- bs]
-      meth (i, t) = fromMaybe (mkDefault i t) $ lookup i ies
-      meths = map meth mits
-      sups = map (const (EVar $ mkIdentSLoc loc dictPrefixDollar)) supers
-      args = sups ++ meths
-      -- When the method type has nested quantifiers the type checker cannot handle
-      --  m = mDflt
-      -- so we eta expand the definition t
-      --  m $1 ... = mDflt $1 ...
-      mkDefault i t = ELam loc [Eqn vs $ simpleAlts $ eApps (EVar dfltId) vs]
-        where dfltId = setSLocIdent loc $ mkDefaultMethodId $ qualIdent clsMdl i
-              vs = [EVar $ mkIdentSLoc loc $ "$" ++ show k | k <- [0 .. countArrows t - 1] ]
-   in args
+     let clsMdl = qualOf qiCls -- get class's module name
+  in let -- When the method type has nested quantifiers the type checker cannot handle
+         --  m = mDflt
+         -- so we eta expand the definition t
+         --  m $1 ... = mDflt $1 ...
+         mkDefault i t = ELam loc [Eqn vs $ simpleAlts $ eApps (EVar dfltId) vs]
+          where dfltId = setSLocIdent loc $ mkDefaultMethodId $ qualIdent clsMdl i
+                vs = [EVar $ mkIdentSLoc loc $ "$" ++ show k | k <- [0 .. countArrows t - 1] ]
+  in let  -- signatures of methods
+         signs = [ (i, t) | Sign is t <- bs, i <- is ]
+  in let addSign i e = maybe e (ESign e) $ lookup i signs
+  in let -- definitions of methods
+         ies = [(i, addSign i $ ELam loc qs) | Fcn i qs <- bs]
+  in let meth (i, t) = fromMaybe (mkDefault i t) $ lookup i ies
+  in let meths = map meth mits
+  in let sups = map (const (EVar $ mkIdentSLoc loc dictPrefixDollar)) supers
+  in let args = sups ++ meths
+  in args
 
 addInst :: Ident -> [IdKind] -> [EConstraint] -> EType -> [IFunDep] -> EDef -> [EBind] -> Ident -> [Expr] -> T [EDef]
 addInst iInst vks ctx cc fds dinst extra qiCls args = do

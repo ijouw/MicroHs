@@ -69,6 +69,9 @@ instance (A Char Char, E Char) where
   a x = x
   e x = x
 
+-- cascading tuples
+instance ((B Char Int, B Int Char), B Char Char, (A Int Char, (A Char Int)))
+
 main :: IO ()
 main = do
   print $ f (5::Int)

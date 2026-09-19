@@ -1434,10 +1434,10 @@ expandInst dinst@(Instance
       Just x -> return x
 
   -- hanlde methods
-  let (instBind, args) = addInstForClass bs qiCls loc mits supers
+  let args = getClassArgs bs qiCls loc mits supers
 
   -- bound method not used in types
-  case filter (not . instBind) bs of
+  case filter (not . instBind mits) bs of
     [] -> return ()
     b:_ -> tcError (getSLoc b) "superflous instance binding"
 
@@ -1448,8 +1448,16 @@ expandInst dinst@(Instance
   -- ignore non-instance
 expandInst d = return [d]
 
-addInstForClass :: [EDef] -> Ident -> SLoc -> [(Ident, EType)] -> [a] -> (EDef -> Bool, [Expr])
-addInstForClass bs qiCls loc mits supers = 
+-- are identifiers bound
+instBind :: [(Ident, EType)] -> EDef -> Bool
+instBind mits = go 
+ where
+  go (Fcn i _) = isJust $ lookup i mits
+  go (Sign is _) = all (\ i -> isJust $ lookup i mits) is
+  go _ = False
+
+getClassArgs :: [EDef] -> Ident -> SLoc -> [(Ident, EType)] -> [a] -> [Expr]
+getClassArgs bs qiCls loc mits supers = 
       -- signatures of methods
   let signs = [ (i, t) | Sign is t <- bs, i <- is ]
       addSign i e = maybe e (ESign e) $ lookup i signs
@@ -1460,10 +1468,6 @@ addInstForClass bs qiCls loc mits supers =
       meths = map meth mits
       sups = map (const (EVar $ mkIdentSLoc loc dictPrefixDollar)) supers
       args = sups ++ meths
-      -- are identifiers bound
-      instBind (Fcn i _) = isJust $ lookup i mits
-      instBind (Sign is _) = all (\ i -> isJust $ lookup i mits) is
-      instBind _ = False
       -- When the method type has nested quantifiers the type checker cannot handle
       --  m = mDflt
       -- so we eta expand the definition t
@@ -1471,8 +1475,7 @@ addInstForClass bs qiCls loc mits supers =
       mkDefault i t = ELam loc [Eqn vs $ simpleAlts $ eApps (EVar dfltId) vs]
         where dfltId = setSLocIdent loc $ mkDefaultMethodId $ qualIdent clsMdl i
               vs = [EVar $ mkIdentSLoc loc $ "$" ++ show k | k <- [0 .. countArrows t - 1] ]
-   in (instBind, args)
-
+   in args
 
 addInst :: Ident -> [IdKind] -> [EConstraint] -> EType -> [IFunDep] -> EDef -> [EBind] -> Ident -> [Expr] -> T [EDef]
 addInst iInst vks ctx cc fds dinst extra qiCls args = do

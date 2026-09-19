@@ -50,6 +50,25 @@ class (B a b, C a b) => D a b where
   -- Multiple solutions
   d = a
 
+class E a where
+  e :: a -> a
+
+instance A Int Int where
+  a x = x
+
+-- Class synonym instances
+type F a = E a
+instance F Int where
+  e x = x
+
+-- Multiple instances at once
+instance (B Int Int, C Int Int)
+
+-- Multiple instances with methods
+instance (A Char Char, E Char) where
+  a x = x
+  e x = x
+
 main :: IO ()
 main = do
   print $ f (5::Int)
@@ -57,3 +76,5 @@ main = do
   print $ h (5::Int) 'a'
   print $ f [88::Int]
   print $ f (1::Int, 'a')
+  print $ (a ('a'::Char) :: Char)
+  print $ e ('b'::Char)

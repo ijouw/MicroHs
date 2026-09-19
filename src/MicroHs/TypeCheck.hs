@@ -1408,6 +1408,13 @@ splitContext act =
         (iks, ctxs, ct') -> (iks, ctx : ctxs, ct')
     _ -> ([], [], act)
 
+expandTup :: EType -> T [EType]
+expandTup t = do
+  u <- expandSyn t
+  case getExprTuple u of
+    Just xs -> concat <$> mapM expandTup xs
+    Nothing -> pure [u]
+
 -- expandInst runs when all kind checking has been done, but no value checking.
 -- So any generated type expressions must be kind correct and fully qualified,
 -- whereas value expressions do not.
@@ -1417,35 +1424,46 @@ expandInst dinst@(Instance
     bs -- methods
     extra
   ) = do
-  -- ctx => cc
-  (vks, ctx, cc) <- splitContext <$> expandSyn act
-  let loc = getSLoc act
-      qiCls = getAppCon cc
-      -- instance identifier
-      iInst = mkInstId loc cc
---  tcTrace ("expandInst " ++ show iInst)
---  (e, _) <- tLookupV iCls
   ct <- gets classTable
---  let qiCls = getAppCon e
+  -- [(vks, ctx => cc)]
+  classes <- fmap splitContext <$> expandTup act
+  (instBinds, declss) <- unzip <$> forM classes (\(vks, ctx, cc) -> do
+    let loc = getSLoc act
+        qiCls = getAppCon cc
+        -- instance identifier
+        iInst = mkInstId loc cc
+--    tcTrace ("expandInst " ++ show iInst)
+--    (e, _) <- tLookupV iCls
+--    let qiCls = getAppCon e
 
-  -- Lookup known class: supers => _ | fds where mits
-  (ClassInfo _ supers _ mits fds) <-
-    case M.lookup qiCls ct of
-      Nothing -> tcError loc $ "not a class " ++ showIdent qiCls
-      Just x -> return x
+    -- Lookup known class: supers => _ | fds where mits
+    (ClassInfo _ supers _ mits fds) <-
+      case M.lookup qiCls ct of
+        Nothing -> tcError loc $ "not a class " ++ showIdent qiCls
+        Just x -> return x
 
-  -- hanlde methods
-  let args = getClassArgs bs qiCls loc mits supers
+    -- hanlde methods
+    let args = getClassArgs bs qiCls loc mits supers
 
-  -- bound method not declared in class
-  case filter (not . instBind mits) bs of
-    [] -> return ()
-    b:_ -> tcError (getSLoc b) "superflous instance binding"
+    -- todo: check for overlaps in method-class correspondence
+
+    -- todo: fds require special handing
+
+    -- class body
+    body <- addInst iInst vks ctx cc fds dinst extra qiCls args
+    pure (instBind mits, body)
+    )
 
   -- todo: check for overlaps in method-class correspondence
 
-  -- class body
-  addInst iInst vks ctx cc fds dinst extra qiCls args
+  let instBindSum = foldr (\f b x -> f x || b x) (const False) instBinds
+  -- bound method not declared in any class
+  case filter (not . instBindSum) bs of
+    [] -> return ()
+    b:_ -> tcError (getSLoc b) "superflous instance binding"
+
+  return (concat declss)
+
   -- ignore non-instance
 expandInst d = return [d]
 

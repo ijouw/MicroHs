@@ -1421,11 +1421,11 @@ expandTup t = do
 -- whereas value expressions do not.
 expandInst :: EDef -> T [EDef]
 expandInst dinst@(Instance act bs extra) = do
-  ct <- gets classTable
   -- ctx => [cc]
-  let (vks, ctx, ucls) = splitContext act
-  cls <- expandTup ucls
-  (instBinds, defss) <- unzip <$> forM cls (\ cc -> do
+  (vks, ctx, uccs) <- splitContext <$> expandSyn act
+  ct <- gets classTable
+  ccs <- expandTup uccs
+  (instBinds, defss) <- unzip <$> forM ccs (\ cc -> do
     let loc = getSLoc act
         qiCls = getAppCon cc
         -- instance identifier

@@ -1423,7 +1423,6 @@ expandInst :: EDef -> T [EDef]
 expandInst dinst@(Instance act bs extra) = do
   -- ctx => [cc]
   (vks, ctx, uccs) <- splitContext <$> expandSyn act
-  ct <- gets classTable
   ccs <- expandTup uccs
   (instBinds, defss) <- unzip <$> forM ccs (\ cc -> do
     let loc = getSLoc act
@@ -1432,6 +1431,7 @@ expandInst dinst@(Instance act bs extra) = do
         iInst = mkInstId loc cc
 --    tcTrace ("expandInst " ++ show iInst)
 --    (e, _) <- tLookupV iCls
+    ct <- gets classTable
 --    let qiCls = getAppCon e
 
     -- Lookup known class: supers => _ | fds where mits

@@ -1420,16 +1420,12 @@ expandTup t = do
 -- So any generated type expressions must be kind correct and fully qualified,
 -- whereas value expressions do not.
 expandInst :: EDef -> T [EDef]
-expandInst dinst@(Instance
-    act -- constraint
-    bs -- methods
-    extra
-  ) = do
+expandInst dinst@(Instance act bs extra) = do
   ct <- gets classTable
   -- ctx => [cc]
-  let (vks, ctx, classes') = splitContext act
-  classes <- expandTup classes'
-  (instBinds, declss) <- unzip <$> forM classes (\cc -> do
+  let (vks, ctx, ucls) = splitContext act
+  cls <- expandTup ucls
+  (instBinds, defss) <- unzip <$> forM cls (\ cc -> do
     let loc = getSLoc act
         qiCls = getAppCon cc
         -- instance identifier
@@ -1447,8 +1443,6 @@ expandInst dinst@(Instance
     -- hanlde methods
     let args = getClassArgs bs qiCls loc mits supers
 
-    -- todo: fds require special handing
-
     -- class body
     body <- addInst iInst vks ctx cc fds dinst extra qiCls args
     pure (instBind mits, body)
@@ -1463,7 +1457,7 @@ expandInst dinst@(Instance
       else "ambiguous instance binding"
       )
 
-  return (concat declss)
+  return (concat defss)
 
   -- ignore non-instance
 expandInst d = return [d]

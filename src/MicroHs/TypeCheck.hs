@@ -1441,11 +1441,34 @@ expandInst dinst@(Instance act bs extra) = do
         Just x -> return x
 
     -- hanlde methods
-    let args = getClassArgs bs qiCls loc mits supers
+    let clsMdl = qualOf qiCls -- get class's module name
+        -- When the method type has nested quantifiers the type checker cannot handle
+        --  m = mDflt
+        -- so we eta expand the definition t
+        --  m $1 ... = mDflt $1 ...
+        mkDefault i t = ELam loc [Eqn vs $ simpleAlts $ eApps (EVar dfltId) vs]
+          where dfltId = setSLocIdent loc $ mkDefaultMethodId $ qualIdent clsMdl i
+                vs = [EVar $ mkIdentSLoc loc $ "$" ++ show k | k <- [0 .. countArrows t - 1] ]
+        -- signatures of methods
+        signs = [ (i, t) | Sign is t <- bs, i <- is ]
+        addSign i e = maybe e (ESign e) $ lookup i signs
+        -- definitions of methods
+        ies = [(i, addSign i $ ELam loc qs) | Fcn i qs <- bs]
+        meth (i, t) = fromMaybe (mkDefault i t) $ lookup i ies
+        meths = map meth mits
+        sups = map (const (EVar $ mkIdentSLoc loc dictPrefixDollar)) supers
+        args = sups ++ meths
 
     -- class body
-    body <- addInst iInst vks ctx cc fds dinst extra qiCls args
-    pure (instBind mits, body)
+        -- given extra, apply class constructor qiCls to args
+        body = eEqns [] $ eLetB extra $ eApps (EVar $ mkClassConstructor qiCls) args
+        -- name it iInst
+        bind = Fcn iInst body
+        -- give it a type
+        sign = Sign [iInst] $ eForall vks $ addConstraints ctx cc
+    addInstTable [(EVar iInst, vks, ctx, cc, fds)]
+    let inst = [dinst, sign, bind]
+    pure (instBind mits, inst)
     )
 
   let instBindSum = foldr (\ f b x -> f x + b x) (const (0 :: Int)) instBinds
@@ -1464,46 +1487,13 @@ expandInst d = return [d]
 
 -- are identifiers bound
 instBind :: [(Ident, EType)] -> EDef -> Int
-instBind mits = go 
+instBind mits = go
  where
   isJust' Just{} = 1
   isJust' Nothing = 0
   go (Fcn i _) = isJust' $ lookup i mits
   go (Sign is _) = sum ((\ i -> isJust' $ lookup i mits) <$> is)
   go _ = 0
-
-getClassArgs :: [EDef] -> Ident -> SLoc -> [(Ident, EType)] -> [EConstraint] -> [Expr]
-getClassArgs bs qiCls loc mits supers = 
-     let clsMdl = qualOf qiCls -- get class's module name
-  in let -- When the method type has nested quantifiers the type checker cannot handle
-         --  m = mDflt
-         -- so we eta expand the definition t
-         --  m $1 ... = mDflt $1 ...
-         mkDefault i t = ELam loc [Eqn vs $ simpleAlts $ eApps (EVar dfltId) vs]
-          where dfltId = setSLocIdent loc $ mkDefaultMethodId $ qualIdent clsMdl i
-                vs = [EVar $ mkIdentSLoc loc $ "$" ++ show k | k <- [0 .. countArrows t - 1] ]
-  in let  -- signatures of methods
-         signs = [ (i, t) | Sign is t <- bs, i <- is ]
-  in let addSign i e = maybe e (ESign e) $ lookup i signs
-  in let -- definitions of methods
-         ies = [(i, addSign i $ ELam loc qs) | Fcn i qs <- bs]
-  in let meth (i, t) = fromMaybe (mkDefault i t) $ lookup i ies
-  in let meths = map meth mits
-  in let sups = map (const (EVar $ mkIdentSLoc loc dictPrefixDollar)) supers
-  in let args = sups ++ meths
-  in args
-
-addInst :: Ident -> [IdKind] -> [EConstraint] -> EType -> [IFunDep] -> EDef -> [EBind] -> Ident -> [Expr] -> T [EDef]
-addInst iInst vks ctx cc fds dinst extra qiCls args = do
-      -- given extra, apply class constructor qiCls to args
-  let body = eEqns [] $ eLetB extra $ eApps (EVar $ mkClassConstructor qiCls) args
-      -- name it iInst
-      bind = Fcn iInst body
-      -- give it a type
-      sign = Sign [iInst] $ eForall vks $ addConstraints ctx cc
-  addInstTable [(EVar iInst, vks, ctx, cc, fds)]
-  return [dinst, sign, bind]
-
 
 ---------------------
 

@@ -1447,8 +1447,6 @@ expandInst dinst@(Instance
     -- hanlde methods
     let args = getClassArgs bs qiCls loc mits supers
 
-    -- todo: check for overlaps in method-class correspondence
-
     -- todo: fds require special handing
 
     -- class body
@@ -1456,11 +1454,14 @@ expandInst dinst@(Instance
     pure (instBind mits, body)
     )
 
-  let instBindSum = foldr (\f b x -> (if f x then 1 else 0) + b x) (const (0 :: Int)) instBinds
-  -- bound method not declared in any class
+  let instBindSum = foldr (\ f b x -> f x + b x) (const (0 :: Int)) instBinds
+  -- bound method should be declared in exactly one class
   case filter ((1 /=) . instBindSum) bs of
     [] -> return ()
-    b:_ -> tcError (getSLoc b) "superflous instance binding"
+    b:_ -> tcError (getSLoc b) (if instBindSum b < 1
+      then "superflous instance binding"
+      else "ambiguous instance binding"
+      )
 
   return (concat declss)
 
@@ -1468,12 +1469,14 @@ expandInst dinst@(Instance
 expandInst d = return [d]
 
 -- are identifiers bound
-instBind :: [(Ident, EType)] -> EDef -> Bool
+instBind :: [(Ident, EType)] -> EDef -> Int
 instBind mits = go 
  where
-  go (Fcn i _) = isJust $ lookup i mits
-  go (Sign is _) = all (\ i -> isJust $ lookup i mits) is
-  go _ = False
+  isJust' Just{} = 1
+  isJust' Nothing = 0
+  go (Fcn i _) = isJust' $ lookup i mits
+  go (Sign is _) = sum ((\ i -> isJust' $ lookup i mits) <$> is)
+  go _ = 0
 
 getClassArgs :: [EDef] -> Ident -> SLoc -> [(Ident, EType)] -> [EConstraint] -> [Expr]
 getClassArgs bs qiCls loc mits supers = 

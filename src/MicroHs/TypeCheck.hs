@@ -1456,11 +1456,9 @@ expandInst dinst@(Instance
     pure (instBind mits, body)
     )
 
-  -- todo: check for overlaps in method-class correspondence
-
-  let instBindSum = foldr (\f b x -> f x || b x) (const False) instBinds
+  let instBindSum = foldr (\f b x -> (if f x then 1 else 0) + b x) (const (0 :: Int)) instBinds
   -- bound method not declared in any class
-  case filter (not . instBindSum) bs of
+  case filter ((1 /=) . instBindSum) bs of
     [] -> return ()
     b:_ -> tcError (getSLoc b) "superflous instance binding"
 

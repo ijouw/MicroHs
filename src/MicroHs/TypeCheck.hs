@@ -1408,6 +1408,7 @@ splitContext act =
         (iks, ctxs, ct') -> (iks, ctx : ctxs, ct')
     _ -> ([], [], act)
 
+-- Convert a Set of Classes to a list while expanding synonyms
 expandTup :: EType -> T [EType]
 expandTup t = do
   u <- expandSyn t
@@ -1476,7 +1477,7 @@ instBind mits = go
   go (Sign is _) = all (\ i -> isJust $ lookup i mits) is
   go _ = False
 
-getClassArgs :: [EDef] -> Ident -> SLoc -> [(Ident, EType)] -> [a] -> [Expr]
+getClassArgs :: [EDef] -> Ident -> SLoc -> [(Ident, EType)] -> [EConstraint] -> [Expr]
 getClassArgs bs qiCls loc mits supers = 
      let clsMdl = qualOf qiCls -- get class's module name
   in let -- When the method type has nested quantifiers the type checker cannot handle

@@ -1441,7 +1441,9 @@ expandInst dinst@(Instance act bs extra) = do
         Just x -> return x
 
     -- hanlde methods
-    let clsMdl = qualOf qiCls -- get class's module name
+    let
+      args = let
+        clsMdl = qualOf qiCls -- get class's module name
         -- When the method type has nested quantifiers the type checker cannot handle
         --  m = mDflt
         -- so we eta expand the definition t
@@ -1457,17 +1459,18 @@ expandInst dinst@(Instance act bs extra) = do
         meth (i, t) = fromMaybe (mkDefault i t) $ lookup i ies
         meths = map meth mits
         sups = map (const (EVar $ mkIdentSLoc loc dictPrefixDollar)) supers
-        args = sups ++ meths
+        in sups ++ meths
 
     -- class body
+      inst = let
         -- given extra, apply class constructor qiCls to args
         body = eEqns [] $ eLetB extra $ eApps (EVar $ mkClassConstructor qiCls) args
         -- name it iInst
         bind = Fcn iInst body
         -- give it a type
         sign = Sign [iInst] $ eForall vks $ addConstraints ctx cc
+        in [dinst, sign, bind] -- todo: is duplicating dinst intended
     addInstTable [(EVar iInst, vks, ctx, cc, fds)]
-    let inst = [dinst, sign, bind]
     pure (instBind mits, inst)
     )
 

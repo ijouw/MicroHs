@@ -69,6 +69,16 @@ instance (A Char Char, E Char) where
   a x = x
   e x = x
 
+-- tuple synonym
+type ABCD a b = (A a b, B a b, C a b, D a b)
+instance ABCD Bool Bool
+
+-- constraints
+type OrddT x y = (Ordd x, Ordd (x,y))
+instance forall a b . (Eqq a, Eqq b, Ord a, Ord b) => OrddT a b where
+  -- allowing to implement both usig same equation is questionable
+  (<==) = (<=)
+
 -- cascading tuples
 instance ((B Char Int, B Int Char), B Char Char, (A Int Char, (A Char Int)))
 

@@ -80,7 +80,7 @@ instance forall a b . (Eqq a, Eqq b, Ord a, Ord b) => OrddT a b where
   e x = x
 
 -- cascading tuples
-instance ((B Char Int, B Int Char), B Char Char, (A Int Char, (A Char Int)))
+instance ((B Char Int, B Int Char), B Char Char, (A Int Char, A Char Int))
 
 main :: IO ()
 main = do

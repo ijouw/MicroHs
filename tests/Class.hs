@@ -90,6 +90,7 @@ instance G Int where
 instance G Bool where
   g' = not
 class G a => H a where
+  h' :: a -> a
   h' = g'
 instance (H Int, H Bool)
 
@@ -102,3 +103,5 @@ main = do
   print $ f (1::Int, 'a')
   print (a ('a'::Char)::Char)
   print (e ('b'::Char)::Char)
+  print $ h' True
+  print $ h' (1::Int)

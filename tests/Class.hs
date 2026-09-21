@@ -62,7 +62,7 @@ instance F Int where
   e x = x
 
 -- Multiple instances at once
-instance (B Int Int, C Int Int)
+instance (B Int Int, C Int Int, D Int Int)
 
 -- Multiple instances with methods
 instance (A Char Char, E Char) where
@@ -81,6 +81,17 @@ instance forall a b . (Eqq a, Eqq b, Ord a, Ord b) => OrddT a b where
 
 -- cascading tuples
 instance ((B Char Int, B Int Char), B Char Char, (A Int Char, A Char Int))
+
+-- unrelated instances
+class G a where
+  g' :: a -> a
+instance G Int where
+  g' x = x
+instance G Bool where
+  g' = not
+class G a => H a where
+  h' = g'
+instance (H Int, H Bool)
 
 main :: IO ()
 main = do

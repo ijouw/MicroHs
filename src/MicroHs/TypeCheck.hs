@@ -1442,6 +1442,8 @@ expandInst dinst@(Instance act bs extra) = do
 
     -- hanlde methods
     let
+      instBind' = instBind mits
+      bs' = filter ((0 /=) . instBind') bs
       args = let
         clsMdl = qualOf qiCls -- get class's module name
         -- When the method type has nested quantifiers the type checker cannot handle
@@ -1452,10 +1454,10 @@ expandInst dinst@(Instance act bs extra) = do
           where dfltId = setSLocIdent loc $ mkDefaultMethodId $ qualIdent clsMdl i
                 vs = [EVar $ mkIdentSLoc loc $ "$" ++ show k | k <- [0 .. countArrows t - 1] ]
         -- signatures of methods
-        signs = [ (i, t) | Sign is t <- bs, i <- is ]
+        signs = [ (i, t) | Sign is t <- bs', i <- is ]
         addSign i e = maybe e (ESign e) $ lookup i signs
         -- definitions of methods
-        ies = [(i, addSign i $ ELam loc qs) | Fcn i qs <- bs]
+        ies = [(i, addSign i $ ELam loc qs) | Fcn i qs <- bs']
         meth (i, t) = fromMaybe (mkDefault i t) $ lookup i ies
         meths = map meth mits
         sups = map (const (EVar $ mkIdentSLoc loc dictPrefixDollar)) supers
@@ -1471,7 +1473,7 @@ expandInst dinst@(Instance act bs extra) = do
         sign = Sign [iInst] $ eForall vks $ addConstraints ctx cc
         in [dinst, sign, bind] -- todo: is duplicating dinst intended
     addInstTable [(EVar iInst, vks, ctx, cc, fds)]
-    pure (instBind mits, inst)
+    pure (instBind', inst)
     )
 
   let instBindSum = foldr (\ f b x -> f x + b x) (const (0 :: Int)) instBinds

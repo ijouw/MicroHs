@@ -1423,7 +1423,7 @@ expandInst :: EDef -> T [EDef]
 expandInst dinst@(Instance act bs extra) = do
   (vks, ctx, uccs) <- splitContext <$> expandSyn act
   ccs <- expandTup uccs
-  (instBinds, defss) <- unzip <$> forM ccs (\ cc -> do
+  (instBinds, defs) <- unzip <$> forM ccs (\ cc -> do
     let loc = getSLoc act
         qiCls = getAppCon cc
         iInst = mkInstId loc cc
@@ -1464,9 +1464,8 @@ expandInst dinst@(Instance act bs extra) = do
     let body = eEqns [] $ eLetB extra $ eApps (EVar $ mkClassConstructor qiCls) args
         bind = Fcn iInst body
         sign = Sign [iInst] $ eForall vks $ addConstraints ctx cc
-        inst = [sign, bind]
     addInstTable [(EVar iInst, vks, ctx, cc, fds)]
-    return (instBind, inst)
+    return (instBind, [sign, bind])
     )
 
   let instBindSum = foldr (\ f b x -> f x + b x) (const 0) instBinds
@@ -1477,7 +1476,7 @@ expandInst dinst@(Instance act bs extra) = do
       else "ambiguous instance binding"
       )
 
-  return (dinst : concat defss)
+  return (dinst : concat defs)
 
 expandInst d = return [d]
 

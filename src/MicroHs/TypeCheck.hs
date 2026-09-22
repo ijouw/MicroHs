@@ -1466,7 +1466,7 @@ expandInst dinst@(Instance act bs extra) = do
         sign = Sign [iInst] $ eForall vks $ addConstraints ctx cc
         inst = [dinst, sign, bind] -- todo: is duplicating dinst intended
     addInstTable [(EVar iInst, vks, ctx, cc, fds)]
-    pure (instBind, inst)
+    return (instBind, inst)
     )
 
   let instBindSum = foldr (\ f b x -> f x + b x) (const 0) instBinds

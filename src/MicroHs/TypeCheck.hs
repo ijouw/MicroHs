@@ -1421,13 +1421,11 @@ expandTup t = do
 -- whereas value expressions do not.
 expandInst :: EDef -> T [EDef]
 expandInst dinst@(Instance act bs extra) = do
-  -- ctx => [cc]
   (vks, ctx, uccs) <- splitContext <$> expandSyn act
   ccs <- expandTup uccs
   (instBinds, defss) <- unzip <$> forM ccs (\ cc -> do
     let loc = getSLoc act
         qiCls = getAppCon cc
-        -- instance identifier
         iInst = mkInstId loc cc
 --    tcTrace ("expandInst " ++ show iInst)
 --    (e, _) <- tLookupV iCls
@@ -1463,11 +1461,8 @@ expandInst dinst@(Instance act bs extra) = do
           where dfltId = setSLocIdent loc $ mkDefaultMethodId $ qualIdent clsMdl i
                 vs = [EVar $ mkIdentSLoc loc $ "$" ++ show k | k <- [0 .. countArrows t - 1] ]
       
-        -- given extra, apply class constructor qiCls to args
     let body = eEqns [] $ eLetB extra $ eApps (EVar $ mkClassConstructor qiCls) args
-        -- name it iInst
         bind = Fcn iInst body
-        -- give it a type
         sign = Sign [iInst] $ eForall vks $ addConstraints ctx cc
         inst = [dinst, sign, bind] -- todo: is duplicating dinst intended
     addInstTable [(EVar iInst, vks, ctx, cc, fds)]
@@ -1475,7 +1470,6 @@ expandInst dinst@(Instance act bs extra) = do
     )
 
   let instBindSum = foldr (\ f b x -> f x + b x) (const 0) instBinds
-  -- bound method should be declared in exactly one class
   case filter ((1 /=) . instBindSum) bs of
     [] -> return ()
     b:_ -> tcError (getSLoc b) (if instBindSum b < 1
@@ -1485,7 +1479,6 @@ expandInst dinst@(Instance act bs extra) = do
 
   return (concat defss)
 
-  -- ignore non-instance
 expandInst d = return [d]
 
 ---------------------

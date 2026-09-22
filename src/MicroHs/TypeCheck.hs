@@ -1464,7 +1464,7 @@ expandInst dinst@(Instance act bs extra) = do
     let body = eEqns [] $ eLetB extra $ eApps (EVar $ mkClassConstructor qiCls) args
         bind = Fcn iInst body
         sign = Sign [iInst] $ eForall vks $ addConstraints ctx cc
-        inst = [dinst, sign, bind] -- todo: is duplicating dinst intended
+        inst = [sign, bind]
     addInstTable [(EVar iInst, vks, ctx, cc, fds)]
     return (instBind, inst)
     )
@@ -1477,7 +1477,7 @@ expandInst dinst@(Instance act bs extra) = do
       else "ambiguous instance binding"
       )
 
-  return (concat defss)
+  return (dinst : concat defss)
 
 expandInst d = return [d]
 

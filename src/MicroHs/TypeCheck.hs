@@ -1440,11 +1440,11 @@ expandInst dinst@(Instance act bs extra) = do
         Nothing -> tcError loc $ "not a class " ++ showIdent qiCls
         Just x -> return x
 
-    let bs' = filter ((0 /=) . instBind) bs
-        signs = [ (i, t) | Sign is t <- bs', i <- is ]
+    let lbs = filter ((0 /=) . instBind) bs
+        signs = [ (i, t) | Sign is t <- lbs, i <- is ]
         addSign i e = maybe e (ESign e) $ lookup i signs
         clsMdl = qualOf qiCls                   -- get class's module name
-        ies = [(i, addSign i $ ELam loc qs) | Fcn i qs <- bs']
+        ies = [(i, addSign i $ ELam loc qs) | Fcn i qs <- lbs]
         meth (i, t) = fromMaybe (mkDefault i t) $ lookup i ies
         meths = map meth mits
         sups = map (const (EVar $ mkIdentSLoc loc dictPrefixDollar)) supers

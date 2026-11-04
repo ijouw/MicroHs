@@ -281,7 +281,7 @@ mkTModule tds tcs =
       [ TypeExport i (tentry i) (assoc i) | Data    (i, _) _ _ <- tds ] ++
       [ TypeExport i (tentry i) (assoc i) | Newtype (i, _) _ _ <- tds ] ++
       [ TypeExport i (tentry i) (assoc i) | Class _ (i, _) _ _ <- tds ] ++
-      [ TypeExport i (tentry i) []        | Type    (i, _) _   <- tds ]
+      [ TypeExport i (tentry i) (assoc i) | Type    (i, _) _   <- tds ]
 
     -- All fixity declaration.
     fes = [ (qualIdent mn i, fx) | Infix fx is <- tds, i <- is ]
@@ -1073,8 +1073,14 @@ bootExportable _ = True
 setDefault :: [EDef] -> T ()
 setDefault defs = do
   tys <- gets typeTable
-  ds <- sequence [ do { ts' <- mapM expandSyn ts; return (tyQIdent $ expLookup c tys, ts') }
-                 | Default (Just c) ts <- defs ]
+  ds <- concat <$> sequence [ do
+    ts' <- mapM expandSyn ts
+    cs <- expandTup (EApp (EVar $ tyQIdent $ expLookup c tys) (EVar dummyIdent))
+    return [ (qi, ts')
+           | c' <- cs
+           , (qi, _) <- maybeToList (getAppM c')
+           ]
+    | Default (Just c) ts <- defs ]
   dflts <- gets defaults
   let dflts' = foldr (uncurry M.insert) dflts ds
 --  traceM $ "Active defaults " ++ show (M.toList dflts')
@@ -1195,6 +1201,18 @@ addAssocs adef = do
               Right e -> [ValueExport i e]
               _       -> []  -- fields with existential type have no selector
       addAssocTable (qualIdent mn ti) (concatMap val is)
+    
+    addAssocSyn ti t = do
+      cs <- expandTup t
+      ct <- gets classTable
+      addAssoc ti $ map (\m -> (m, m)) $ nub
+        [ m
+        | c <- cs
+        , (qiCls, _) <- maybeToList (getAppM c)
+        , ClassInfo _ _ _ mits _ <- maybeToList (M.lookup qiCls ct)
+        , (mi, _) <- mits
+        , m <- [mi, mkDefaultMethodId mi]
+        ]
 
     assocData _ (Constr _ _ c _ (Left _)) = [(c, c)]
     -- Keep the visible field name, but look up its owner-specific getter.
@@ -1206,6 +1224,7 @@ addAssocs adef = do
                         -> addAssoc i (nub $ concatMap (assocData i) cs)
     Newtype (i, _) c  _ -> addAssoc i (assocData i c)
     Class _ (i, _) _ ms -> addAssoc i [ (x, x) | Sign ns _ <- ms, m <- ns, x <- [m, mkDefaultMethodId m] ]
+    Type    (i, _) t    -> addAssocSyn i t
     _                   -> return ()
 
 -- Add type synonyms to the synonym table, and data/newtype to the data table.

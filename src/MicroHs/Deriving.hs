@@ -31,11 +31,11 @@ deriveStrat mctx newt lhs cs strat (narg, acls) =  -- narg is the number of argu
   let c = cs!!0; cls = dropForallContext acls in
   case strat of
     DerNone | newt && useNewt cls -> maybe (deriveNoHdr mctx narg lhs cs  cls)
-                                           (newtypeDer  mctx narg lhs  c acls)
+                                           (newtypeDerV mctx narg lhs  c acls)
                                            (getViaM narg lhs c)
             | otherwise           -> deriveNoHdr mctx narg lhs cs  cls
     DerStock                      -> deriveNoHdr mctx narg lhs cs  cls
-    DerNewtype | newt             -> newtypeDer  mctx narg lhs  c acls =<< getVia narg lhs c
+    DerNewtype | newt             -> newtypeDerV mctx narg lhs  c acls =<< getVia narg lhs c
     DerAnyClass                   -> anyclassDer mctx narg lhs     cls
     DerVia via | newt             -> newtypeDer  mctx narg lhs  c acls via
     _                             -> cannotDerive lhs cls
@@ -753,6 +753,12 @@ getViaM narg (_, iks) con =
 
 getVia :: Int -> LHS -> Constr -> T EType
 getVia narg lhs con = maybe (tcError (getSLoc lhs) "Bad newtype deriving") return $ getViaM narg lhs con
+
+newtypeDerV :: StandM -> Int -> LHS -> Constr -> EConstraint -> EType -> T [EDef]
+newtypeDerV mctx narg lhs@(_, iks) con acls viaty = newtypeDer mctx narg lhs con acls v
+  where v | Just (h, _) <- mctx, Just (_, tys) <- getAppM (dropForallContext h), Just (_, args) <- getAppM (last tys)
+            = subst (zip (map idKindIdent (dropEnd narg iks)) args) viaty
+          | otherwise = viaty
 
 newtypeDer :: StandM -> Int -> LHS -> Constr -> EConstraint -> EType -> T [EDef]
 newtypeDer mctx narg lhs@(_tycon, iks) _con acls viaty = do

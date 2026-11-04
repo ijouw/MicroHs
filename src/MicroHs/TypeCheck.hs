@@ -1073,8 +1073,11 @@ bootExportable _ = True
 setDefault :: [EDef] -> T ()
 setDefault defs = do
   tys <- gets typeTable
-  ds <- sequence [ do { ts' <- mapM expandSyn ts; return (tyQIdent $ expLookup c tys, ts') }
-                 | Default (Just c) ts <- defs ]
+  ds <- concat <$> sequence [ do 
+    ts' <- mapM expandSyn ts
+    cs <- expandTup (EApp (EVar $ tyQIdent $ expLookup c tys) (EVar dummyIdent))
+    return [ (qi, ts') | c' <- cs , (qi,_) <- maybeToList (getAppM c')]
+    | Default (Just c) ts <- defs ]
   dflts <- gets defaults
   let dflts' = foldr (uncurry M.insert) dflts ds
 --  traceM $ "Active defaults " ++ show (M.toList dflts')
@@ -1257,13 +1260,17 @@ tcStand st ct = do
      -- It's needed for the number of arguments to "eta reduce",
      -- and also for kind checking the via type.
      -- So find the kind of the last argument to the class
-     (vks, kty) <- do
-       let (cvks, _ctx, cty) = splitContext ct'
-           cls = fst $ getApp cty
-       ctbl <- gets classTable
-       case M.lookup cls ctbl of
-         Just (ClassInfo vks@(_:_) _ _ _ _) -> case last vks of IdKind _ k -> return (cvks, k)
-         _ -> tcError (getSLoc ct) $ "not a class " ++ showIdent cls
+     (vkss, ktys) <- unzip <$> do
+       (cvks, _ctx, scty) <- splitContext <$> expandSyn ct'
+       ctys <- expandTup scty
+       forM ctys $ \cty -> do
+         let cls = fst $ getApp cty
+         ctbl <- gets classTable
+         case M.lookup cls ctbl of
+           Just (ClassInfo vks@(_:_) _ _ _ _) -> case last vks of IdKind _ k -> return (cvks, k)
+           _ -> tcError (getSLoc ct) $ "not a class " ++ showIdent cls
+     let vks = concat vkss
+         kty = head ktys
      let narg = length $ fst $ getArrows kty
      st' <-
        case st of

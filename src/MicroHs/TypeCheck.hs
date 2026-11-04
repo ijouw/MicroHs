@@ -1073,11 +1073,8 @@ bootExportable _ = True
 setDefault :: [EDef] -> T ()
 setDefault defs = do
   tys <- gets typeTable
-  ds <- concat <$> sequence [ do 
-    ts' <- mapM expandSyn ts
-    cs <- expandTup (EApp (EVar $ tyQIdent $ expLookup c tys) (EVar dummyIdent))
-    return [ (qi, ts') | c' <- cs , (qi,_) <- maybeToList (getAppM c')]
-    | Default (Just c) ts <- defs ]
+  ds <- sequence [ do { ts' <- mapM expandSyn ts; return (tyQIdent $ expLookup c tys, ts') }
+                 | Default (Just c) ts <- defs ]
   dflts <- gets defaults
   let dflts' = foldr (uncurry M.insert) dflts ds
 --  traceM $ "Active defaults " ++ show (M.toList dflts')

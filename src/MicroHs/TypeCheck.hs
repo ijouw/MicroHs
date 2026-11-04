@@ -1207,7 +1207,7 @@ addAssocs adef = do
     -- Keep the visible field name, but look up its owner-specific getter.
     assocData ti (Constr _ _ c _ (Right its)) =
       (c, c) : [ (f, mkGetName ti f) | (f, _) <- its ]
-    
+
     assocSyn c
       | Just (qiCls, _) <- getAppM c, Just (ClassInfo _ _ _ mits _) <- M.lookup qiCls ct =
         [ (x, x) | (mi, _) <- mits, x <- [mi, mkDefaultMethodId mi] ]

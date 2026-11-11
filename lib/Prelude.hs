@@ -22,7 +22,7 @@ module Prelude(
   module Data.List,
   module Data.Maybe,
   module Data.Monoid.Internal,
-  module Data.Num,
+  Num(..), subtract,
   module Data.Ord,
   module Data.Ratio,
   module Data.Real,
@@ -38,6 +38,7 @@ module Prelude(
   module Text.Show,
   Float, Double,
   default Num,
+  default NumLit,
   default IsString,
   _usingMhs, _wordSize,
   _isLinux, _isMacOS, _isWindows,
@@ -73,7 +74,7 @@ import Data.List([](..), map, (++), filter, head, last, tail, init, null, length
                  lines, words, unlines, unwords)
 import Data.Maybe(Maybe(..), maybe)
 import Data.Monoid.Internal(Monoid(..), Semigroup((<>)))
-import Data.Num(Num(..), subtract)
+import Data.Num(Num(..), NumLit, subtract)
 import Data.Ord(Ord(..), Ordering(..))
 import Data.Ratio(Rational)
 import Data.Real(Real(..))
@@ -93,6 +94,7 @@ import Primitives(_wordSize, _isLinux, _isMacOS, _isWindows)
 import Data.Orphans()  -- Extra instances
 
 default Num (Integer, Double)
+default NumLit (Integer, Double)
 default IsString (String)
 
 -- So we can detect mhs vs ghc

@@ -12,6 +12,10 @@
 #define WANT_IMATH 1
 #endif /* defined(WANT_MATH) */
 
+#if WANT_GMP && WANT_IMATH
+#error "Cannot have both WANT_GMP and WANT_IMATH"
+#endif
+
 #if !defined(WANT_OVERFLOW)
 #define WANT_OVERFLOW 0
 #endif /* defined(WANT_OVERFLOW) */
@@ -205,6 +209,14 @@ void GETCPUTIME(long *sec, long *nsec) { *sec = 0; *nsec = 0; }
 #define INLINE inline
 #endif  /* !define(INLINE) */
 
+#if !defined(NOINLINE)
+#if defined(__GNUC__) || defined(__clang__)
+#define NOINLINE __attribute__((noinline))
+#else
+#define NOINLINE
+#endif
+#endif  /* !defined(NOINLINE) */
+
 #if !defined(NORETURN)
 /*#define NORETURN [[noreturn]]*/
 #define NORETURN _Noreturn
@@ -212,7 +224,8 @@ void GETCPUTIME(long *sec, long *nsec) { *sec = 0; *nsec = 0; }
 
 #if !defined(PACKED)
 #if WORD_SIZE == 32
-#define PACKED __attribute__((packed))
+/* Avoid 64 bit alignment to keep nodes to 12 bytes */
+#define PACKED __attribute__((packed, aligned(4)))
 #else
 #define PACKED
 #endif  /* WORD_SIZE == 32 */
@@ -547,7 +560,7 @@ enum node_tag { T_FREE, T_IND, T_AP, T_INT, T_INT64, T_DBL, T_FLT32, T_PTR, T_FU
                 T_IO_PERFORMIO, T_IO_ATOMIC, T_IO_PRINT, T_CATCH, T_CATCHR,
                 T_IO_CCALL,
                 T_IO_GC, T_IO_STATS,
-                T_IO_LAZYBIND, T_IO_STRICT,
+                T_IO_LAZYBIND, T_IO_STRICT, T_IO_LAZYBINDST,
                 T_DYNSYM,
                 T_IO_FORK, T_IO_THID, T_THNUM, T_IO_THROWTO, T_IO_YIELD,
                 T_IO_NEWMVAR,
@@ -560,6 +573,10 @@ enum node_tag { T_FREE, T_IND, T_AP, T_INT, T_INT64, T_DBL, T_FLT32, T_PTR, T_FU
                 T_BSUNPACK, T_BSREPLICATE, T_BSLENGTH, T_BSSUBSTR, T_BSINDEX,
                 T_BSNEW, T_BSREAD, T_BSWRITE, T_BSFREEZE, T_BSAPPBYTE, T_BSAPPCHAR, 
                 T_BSFROMUTF8, T_BSHEADUTF8, T_BSTAILUTF8,
+                T_UTF8LENGTH, T_UTF8OFFSET, T_UTF8OFFSETEND, T_UTF8OFFSETFROM, T_UTF8OFFSETENDBEFORE,
+                T_UTF8DECODE, T_UTF8DECODEEND,
+                T_UTF8REVERSE, T_UTF8SKIPSPACE, T_UTF8SKIPNONSPACE, T_UTF8TRIMSPACEEND,
+                T_BSFIND, T_BSRFIND, T_BSASCIICASE, T_BSISASCII, T_BSCONCAT,
                 T_BSAPPENDDOT, T_BSGRAB, T_BSGRABLEN,
                 T_SPNEW, T_SPDEREF, T_SPFREE,
                 T_WKNEWFIN, T_WKNEW, T_WKDEREF, T_WKFINAL,
@@ -1159,10 +1176,6 @@ gc_check(size_t k)
 {
   if (k < num_free)
     return;
-#if WANT_STDIO
-  if (verbose > 1)
-    PRINT("gc_check: %d\n", (int)k);
-#endif
   gc();
 }
 
@@ -2072,24 +2085,103 @@ static INLINE int is_marked_used(NODEPTR n)
   return (free_map[i / BITS_PER_WORD] & (1ULL << (i % BITS_PER_WORD))) == 0;
 }
 
+/*
+ * Bump allocation inside a run of free cells (BUMP_ALLOC, default on).
+ *
+ * The free map is scanned first-fit in address order, so consecutive
+ * allocations almost always come from consecutive cells anyway.  Finding the
+ * cell one at a time costs a word load, FFS, a bit clear and a store to
+ * next_scan_index per allocation, and the store-forwarding chain through
+ * free_map[i] and next_scan_index serialises back-to-back allocations.
+ * Instead bump_refill() claims a whole run of free cells at once (clearing
+ * their map bits eagerly) and alloc_node just bumps a pointer through it.
+ * Runs average a few dozen cells on the self-compile, so the refill is cold.
+ *
+ * Invariants: num_free still counts exactly the unallocated cells (the
+ * claimed-but-unused tail of the run is included), so gc_check's budget is
+ * unchanged.  The map overstates "used" by that tail, which is harmless
+ * because the map is only read by the GC, and gc() rebuilds it from scratch.
+ * bump_ptr/bump_end are globals, never cached in evali locals: longjmp
+ * (T_CATCHR, resched) and nested GCs would otherwise see stale values.
+ */
+#if !defined(BUMP_ALLOC)
+#define BUMP_ALLOC 1
+#endif
+
+#if BUMP_ALLOC
+static NODEPTR bump_ptr, bump_end;    /* current run: [bump_ptr, bump_end) */
+#endif
+
 static INLINE void mark_all_free(void)
 {
   memset(free_map, ~0, free_map_nwords * sizeof(bits_t));
   next_scan_index = heap_start;
+#if BUMP_ALLOC
+  /* The map is about to be rebuilt by the marker (or is fresh at init), so a
+   * run claimed from the old map is stale: its cells may now be live. */
+  bump_ptr = bump_end = 0;
+#endif
 }
+
+#if BUMP_ALLOC
+/* Claim the next run of free cells.  Out of line: it runs once per run, and
+ * keeping it out of alloc_node keeps the hot path to a compare and a bump. */
+static NOINLINE void
+bump_refill(void)
+{
+  heapoffs_t i = next_scan_index / BITS_PER_WORD;
+  heapoffs_t pos;
+  bits_t word, inv, mask;
+  int k, run;
+
+  for(;;) {
+    /* Not just under SANITY: the caller only checked num_free > 0, and an
+     * inconsistent num_free must not turn into a read past the map. */
+    if (i >= free_map_nwords)
+      ERR("bump_refill: free_map");
+    word = free_map[i];
+    if (word)
+      break;
+    i++;
+  }
+  k = FFS(word) - 1;            /* bit index of the first free cell */
+  /* Run length = number of consecutive 1 bits starting at k.  Bit 0 of
+   * word >> k is set, so inv is 0 only for k == 0 with every bit set; that
+   * case is handled explicitly because CTZ(0) is not portable. */
+  inv = ~(word >> k);
+  run = inv ? (int)CTZ(inv) : (int)(BITS_PER_WORD - k);
+  pos = i * BITS_PER_WORD + k;
+  /* The last map word has bits past heap_size when heap_size is not a
+   * multiple of the word size; those bits are set but the cells do not exist. */
+  if (pos + run > heap_size)
+    run = (int)(heap_size - pos);
+  mask = (run == (int)BITS_PER_WORD ? ~(bits_t)0 : (((bits_t)1 << run) - 1)) << k;
+  free_map[i] = word & ~mask;   /* claim the whole run now */
+  next_scan_index = pos + run;
+  bump_ptr = HEAPREF(pos);
+  bump_end = bump_ptr + run;
+}
+#endif  /* BUMP_ALLOC */
 
 static INLINE NODEPTR
 alloc_node(enum node_tag t)
 {
+  NODEPTR n;
+
+  /* This can happen if we run out of memory when parsing.
+   * It also guarantees bump_refill() finds a free cell. */
+  if (num_free <= 0)
+    ERR("alloc_node");
+
+#if BUMP_ALLOC
+  if (bump_ptr == bump_end)
+    bump_refill();
+  n = bump_ptr++;
+#else  /* BUMP_ALLOC */
   heapoffs_t i = next_scan_index / BITS_PER_WORD;
   int k;                        /* will contain bit pos + 1 */
   heapoffs_t pos;
-  NODEPTR n;
   heapoffs_t word;
-
-  /* This can happen if we run out of memory when parsing. */
-  if (num_free <= 0)
-    ERR("alloc_node");
 
   for(;;) {
     word = free_map[i];
@@ -2112,6 +2204,7 @@ alloc_node(enum node_tag t)
   // mark_used(n); // equivalent to:
   free_map[i] = word & (word-1);
   next_scan_index = pos;
+#endif  /* BUMP_ALLOC */
 
   SETTAG(n, t);
   COUNT(num_alloc);
@@ -2411,6 +2504,23 @@ struct {
   { "fromUTF8", T_BSFROMUTF8 },
   { "headUTF8", T_BSHEADUTF8 },
   { "tailUTF8", T_BSTAILUTF8 },
+  /* Data.Text helpers: lengths and offsets are in code points and bytes */
+  { "utf8length", T_UTF8LENGTH },
+  { "utf8offset", T_UTF8OFFSET },
+  { "utf8offsetend", T_UTF8OFFSETEND },
+  { "utf8offsetfrom", T_UTF8OFFSETFROM },
+  { "utf8offsetendbefore", T_UTF8OFFSETENDBEFORE },
+  { "utf8decode", T_UTF8DECODE },
+  { "utf8decodeend", T_UTF8DECODEEND },
+  { "utf8reverse", T_UTF8REVERSE },
+  { "utf8skipspace", T_UTF8SKIPSPACE },
+  { "utf8skipnonspace", T_UTF8SKIPNONSPACE },
+  { "utf8trimspaceend", T_UTF8TRIMSPACEEND },
+  { "bsfind", T_BSFIND },
+  { "bsrfind", T_BSRFIND },
+  { "bsasciicase", T_BSASCIICASE },
+  { "bsisascii", T_BSISASCII },
+  { "bsconcat", T_BSCONCAT },
   /* IO primops */
   { "IO.>>=", T_IO_BIND },
   { "IO.>>", T_IO_THEN },
@@ -2428,6 +2538,7 @@ struct {
   { "IO.stats", T_IO_STATS },
   { "IO.pp", T_IO_PP },
   { "IO.lazyBind", T_IO_LAZYBIND },
+  { "IO.lazyBindST", T_IO_LAZYBINDST },
   { "IO.strict", T_IO_STRICT },
   { "raise", T_RAISE },
   { "catch", T_CATCH },
@@ -2539,7 +2650,11 @@ enum node_tag flip_ops[T_LAST_TAG+1];
  * Use a hash table with open linear probing for the lookup of primpo names.
  * Make the hash table twice the size of the number of primops so we get a load factor of 0.5.
  */
-#define PRIMOP_HASH_SIZE (2 * sizeof primops / sizeof primops[0])
+#define PRIMOP_HASH_SIZE (2 * sizeof primops / sizeof primops[0] + 5)
+/*
+ * Without the + 5 above the time on my MacBook more that doubles!
+ * It's a mystery why.
+ */
 static struct {
   const char   *name;           /* NULL marks an empty slot */
   enum node_tag tag;
@@ -2571,13 +2686,8 @@ init_primop_hash(void)
     while (primop_hash[k].name) {
       k = (k + 1) % PRIMOP_HASH_SIZE;
     }
-    /* Found the first empty slot for this hash.
-     * Insert the (name,tag) pair.
-     */
-    if (primop_hash[k].name == NULL) {
-      primop_hash[k].name = primops[i].name;
-      primop_hash[k].tag  = primops[i].tag;
-    }
+    primop_hash[k].name = primops[i].name;
+    primop_hash[k].tag  = primops[i].tag;
   }
 }
 
@@ -2920,13 +3030,59 @@ gc_red_ok(NODEPTR n)
   return 1;
 }
 
+/*
+ * Marking is a DRAM-latency bound pointer chase: a cell is visited once per
+ * GC and almost never in cache, so each visit costs a full miss.
+ * The work stack lets us know the next MARK_PFQ cells in advance, so we
+ * prefetch them and keep that many misses in flight (a FIFO prefetch queue
+ * as in Cher et al., "Software prefetching for mark-sweep GC").
+ * On an Apple M1 this cut mark time by about 3x; 16 entries was the knee.
+ * Set -DMARK_PFQ=0 to get the plain stack-driven loop (e.g. embedded targets).
+ */
+#if !defined(MARK_PFQ)
+#define MARK_PFQ 16
+#endif
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_prefetch)
+#define MARK_PREFETCH(p) __builtin_prefetch(p)
+#endif
+#elif defined(__GNUC__)
+#define MARK_PREFETCH(p) __builtin_prefetch(p)
+#endif
+#if !defined(MARK_PREFETCH)
+/* No prefetch available, so the ring would be pure overhead. */
+#undef MARK_PFQ
+#define MARK_PFQ 0
+#endif
+#if MARK_PFQ > 0 && !defined(MARK_PFQ_MAXDEPTH)
+/*
+ * The ring reorders the depth-first walk: it always refills from the newest
+ * work-stack entries and consumes one entry per visit, so on a long spine
+ * whose visits push more entries than they consume (a list of records,
+ * a string read from a handle, ...) the older entries are stranded on the
+ * stack and it grows linearly with the length of the list instead of staying
+ * at the depth of the structure.  Above this much growth within one mark()
+ * call the plain depth-first step is used until the stack has drained again,
+ * which bounds the extra stack to this limit plus the structure's depth.
+ * The self-compile peaks around 20K slots, well below the default.
+ */
+#define MARK_PFQ_MAXDEPTH ((stackptr_t)(stack_size / 8))
+#endif
+
 /* Mark all used nodes reachable from *np, updating *np. */
 void
 mark(NODEPTR *np)
 {
   stackptr_t stk = stack_ptr;
   NODEPTR n;
-  NODEPTR *to_push = 0;         /* silence warning by initializing */
+#if MARK_PFQ > 0
+  /* Ring of pending slots whose cells have been prefetched.
+   * Every (possibly nested) mark() call owns its own ring and drains it
+   * before returning, so recursion through GCRED and the
+   * thread/mvar side structures is unaffected. */
+  NODEPTR *pfq[MARK_PFQ];
+  unsigned pfq_head = 0, pfq_tail = 0, pfq_n = 0;
+#endif
 #if GCRED
   value_t val;
 #endif
@@ -3088,10 +3244,36 @@ mark(NODEPTR *np)
 #else   /* GCRED */
    case T_AP:
 #endif  /* GCRED */
-    /* Avoid tail recursion */
+#if MARK_PFQ > 0
+    if (stack_ptr - stk <= MARK_PFQ_MAXDEPTH) {
+      /* The probe keeps already-marked (shared) nodes off the work stack;
+       * it only touches the bitmap, not the cell.  The cell itself is not read
+       * until the ring has prefetched it, which is why the mark-integer-leaves
+       * shortcut of the plain step below (it needs the cell's tag) is not used. */
+      if (!is_marked_used(ARG(n)))
+        PUSH((NODEPTR)&ARG(n));
+      /* FUN becomes a work item too, so the ring can prefetch it.
+       * It is pushed last so that the spine is still walked first. */
+      if (!is_marked_used(FUN(n)))
+        PUSH((NODEPTR)&FUN(n));
+      goto fin;
+    }
+    /* Stack has grown too much (see MARK_PFQ_MAXDEPTH): plain step. */
+#endif  /* MARK_PFQ */
+    /* Mark integer leaves immediately instead of deferring them while walking
+     * the other branch.  In particular, a string can contain a distinct integer
+     * node (behind an indirection) for every character read from a handle.
+     */
+    if (GETTAG(indir(&ARG(n))) == T_INT) {
+      mark(&ARG(n));
+    } else if (!is_marked_used(ARG(n))) {
+      /* The probe keeps already-marked (shared) nodes off the work stack. */
+      PREFETCH_READ(ARG(n));   /* won't be popped and dereferenced until later */
+      PUSH((NODEPTR)&ARG(n));
+    }
+    /* Iterate straight down the spine; keeps the work stack shallow. */
     np = &FUN(n);
-    to_push = &ARG(n);
-    break;
+    goto top;
    case T_ARR:
     {
       struct ioarray *arr = ARR(n);
@@ -3104,9 +3286,11 @@ mark(NODEPTR *np)
       // as there's more entries to scan.
       mark_unused(n);
       num_marked--;
-      to_push = np;
-      np = &arr->array[arr->marked++];
-      break;
+      PUSH((NODEPTR)np);
+      if (!is_marked_used(arr->array[arr->marked]))
+        PUSH((NODEPTR)&arr->array[arr->marked]);
+      arr->marked++;
+      goto fin;
     }
 
    case T_FORPTR:
@@ -3129,23 +3313,32 @@ mark(NODEPTR *np)
      goto fin;
   }
 
-  /* Mark integer leaves immediately instead of deferring them while walking
-   * the other branch.  In particular, a string can contain a distinct integer
-   * node (behind an indirection) for every character read from a handle.
-   */
-  if (GETTAG(indir(to_push)) == T_INT) {
-    mark(to_push);
-  } else if (!is_marked_used(*to_push)) {
-    //  mark_depth++;
-    PREFETCH_READ(*to_push);   /* won't be popped and dereferenced until later */
-    PUSH((NODEPTR)to_push);
-  }
-  goto top;
  fin:
-  //  if (mark_depth > max_mark_depth) {
-  //    max_mark_depth = mark_depth;
-  //  }
-  //  mark_depth--;
+#if MARK_PFQ > 0
+  if (stack_ptr - stk <= MARK_PFQ_MAXDEPTH) {
+    /* Top up the ring from the work stack, issuing a prefetch for each
+     * pending cell, then process the oldest entry: by now its cell has had
+     * MARK_PFQ-1 other visits worth of time to arrive in cache. */
+    while (pfq_n < MARK_PFQ && stack_ptr > stk) {
+      NODEPTR *slot = (NODEPTR *)POPTOP();
+      MARK_PREFETCH(*slot);
+      pfq[pfq_tail] = slot;
+      pfq_tail = (pfq_tail + 1) % MARK_PFQ;
+      pfq_n++;
+    }
+    if (pfq_n > 0) {
+      np = pfq[pfq_head];
+      pfq_head = (pfq_head + 1) % MARK_PFQ;
+      pfq_n--;
+      goto top;
+    }
+    /* Ring empty here means the loop above found the stack empty. */
+    return;
+  }
+  /* Too deep (see MARK_PFQ_MAXDEPTH): plain depth-first pops until the
+   * stack has drained; the ring's pending entries wait, they are picked up
+   * again when the ring is resumed. */
+#endif  /* MARK_PFQ */
   if (stack_ptr > stk) {
     np = (NODEPTR *)POPTOP();
     goto top;
@@ -4100,10 +4293,13 @@ parse(struct parse_ctx *pc, BFILE *f)
     default:
       buf[0] = c;
       /* A primitive, keep getting char's until end */
-      for (j = 1; (buf[j] = getNT(f)); j++)
-        ;
+      for (j = 1; (buf[j] = getNT(f)); j++) {
+        if (j >= sizeof buf) {
+          DESER_ERR("bad input");
+        }
+      }
 
-        // Look up the primop (O(1) hash lookup) and use the preallocated node.
+      /* Look up the primop (O(1) hash lookup) and use the preallocated node. */
       {
         int t = lookup_primop(buf);
         if (t < 0)
@@ -4143,7 +4339,7 @@ parse_top(BFILE *f, struct ffe_entry *ffe)
     /* exception */
     if (pc->shared_table)
       FREE(pc->shared_table);
-    raise_rts(exn_deserialize);
+    return NIL;
   } else {
     checkversion(pc, f);
     numLabels = parse_int(f);
@@ -4859,33 +5055,281 @@ headutf8(struct bytestring bs, void **ret)
       *ret = p;
     return c1;
   }
-  if (bs.bs_size == 1)
-    ERR("headUTF8 1");
-  int c2 = *p++;
-  if ((c1 & 0xe0) == 0xc0) {
-    if (ret)
-      *ret = p;
-    return ((c1 & 0x1f) << 6) | (c2 & 0x3f);
+  if ((c1 & 0xe0) == 0xc0 && bs.bs_size >= 2) {
+    int c2 = p[0];
+    if ((c2 & 0xc0) == 0x80) {
+      int c = ((c1 & 0x1f) << 6) | (c2 & 0x3f);
+      if (c == 0 || c >= 0x80) {
+        if (ret)
+          *ret = p + 1;
+        return c;
+      }
+    }
+  } else if ((c1 & 0xf0) == 0xe0 && bs.bs_size >= 3) {
+    int c2 = p[0], c3 = p[1];
+    if ((c2 & 0xc0) == 0x80 && (c3 & 0xc0) == 0x80) {
+      int c = ((c1 & 0x0f) << 12) | ((c2 & 0x3f) << 6) | (c3 & 0x3f);
+      if (c >= 0x800 && (c < 0xd800 || c > 0xdfff)) {
+        if (ret)
+          *ret = p + 2;
+        return c;
+      }
+    }
+  } else if ((c1 & 0xf8) == 0xf0 && bs.bs_size >= 4) {
+    int c2 = p[0], c3 = p[1], c4 = p[2];
+    if ((c2 & 0xc0) == 0x80 && (c3 & 0xc0) == 0x80 && (c4 & 0xc0) == 0x80) {
+      int c = ((c1 & 0x07) << 18) | ((c2 & 0x3f) << 12) | ((c3 & 0x3f) << 6) | (c4 & 0x3f);
+      if (c >= 0x10000 && c < 0x110000) {
+        if (ret)
+          *ret = p + 3;
+        return c;
+      }
+    }
   }
-  if (bs.bs_size == 2)
-    ERR("headUTF8 2");
-  int c3 = *p++;
-  if ((c1 & 0xf0) == 0xe0) {
-    if (ret)
-      *ret = p;
-    return ((c1 & 0x0f) << 12) | ((c2 & 0x3f) << 6) | (c3 & 0x3f);
-  }
-  if (bs.bs_size == 3)
-    ERR("headUTF8 3");
-  int c4 = *p++;
-  if ((c1 & 0xf8) == 0xf0) {
-    if (ret)
-      *ret = p;
-    return ((c1 & 0x07) << 18) | ((c2 & 0x3f) << 12) | ((c3 & 0x3f) << 6) | (c4 & 0x3f);
-  }
-  ERR("headUTF8 4");
-  NOTREACHED;
+  if (ret)
+    *ret = p;
+  return 0xdc00 | c1;
 #endif  /* WANT_UTF8 */
+}
+
+/*
+ * Helpers for Data.Text, whose Text is a (modified) UTF-8 ByteString.
+ * Positions are byte offsets; counts are in characters.  A character
+ * starts at every byte that is not a continuation byte (10xxxxxx).
+ * Without WANT_UTF8 every byte is a character.
+ */
+#if WANT_UTF8
+#define UTF8CONT(b) (((b) & 0xc0) == 0x80)
+#else
+#define UTF8CONT(b) ((void)(b), 0)
+#endif
+
+/* Number of characters. */
+static value_t
+utf8length(struct bytestring bs)
+{
+  const uint8_t *p = bs.bs_array;
+  value_t n = 0;
+  for (size_t i = 0; i < bs.bs_size; i++)
+    n += !UTF8CONT(p[i]);
+  return n;
+}
+
+/* Byte offset after the first k characters from byte offset i (clamped
+ * to the string). */
+static value_t
+utf8offsetfrom(struct bytestring bs, value_t i0, value_t k)
+{
+  const uint8_t *p = bs.bs_array;
+  size_t n = bs.bs_size;
+  size_t i = i0 < 0 ? 0 : (size_t)i0 > n ? n : (size_t)i0;
+  for (; k > 0 && i < n; k--) {
+    i++;
+    while (i < n && UTF8CONT(p[i]))
+      i++;
+  }
+  return i;
+}
+
+/* Byte offset where the last k characters before byte offset i start
+ * (clamped to the string). */
+static value_t
+utf8offsetendbefore(struct bytestring bs, value_t i0, value_t k)
+{
+  const uint8_t *p = bs.bs_array;
+  size_t n = bs.bs_size;
+  size_t i = i0 < 0 ? 0 : (size_t)i0 > n ? n : (size_t)i0;
+  for (; k > 0 && i > 0; k--) {
+    i--;
+    while (i > 0 && UTF8CONT(p[i]))
+      i--;
+  }
+  return i;
+}
+
+/* Byte offset after the first k characters (clamped to the string). */
+static value_t
+utf8offset(struct bytestring bs, value_t k)
+{
+  return utf8offsetfrom(bs, 0, k);
+}
+
+/* Byte offset where the last k characters start (clamped to the string). */
+static value_t
+utf8offsetend(struct bytestring bs, value_t k)
+{
+  return utf8offsetendbefore(bs, bs.bs_size, k);
+}
+
+/* Decode the character starting at byte offset i (which must be < size).
+ * Returns (code point << 3) | (bytes used). */
+static value_t
+utf8decode(struct bytestring bs, value_t i)
+{
+  struct bytestring rest;
+  void *out;
+  value_t c;
+  if (i < 0 || (size_t)i >= bs.bs_size)
+    ERR("utf8decode");
+  rest.bs_array = (uint8_t *)bs.bs_array + i;
+  rest.bs_size = bs.bs_size - i;
+  rest.bs_capacity = 0;
+  c = headutf8(rest, &out);
+  return (c << 3) | ((uint8_t *)out - (uint8_t *)rest.bs_array);
+}
+
+/* Decode the character that ends at byte offset e (which must be > 0).
+ * Returns (code point << 3) | (bytes used). */
+static value_t
+utf8decodeend(struct bytestring bs, value_t e)
+{
+  const uint8_t *p = bs.bs_array;
+  value_t s;
+  if (e <= 0 || (size_t)e > bs.bs_size)
+    ERR("utf8decodeend");
+  for (s = e - 1; s > 0 && UTF8CONT(p[s]); s--)
+    ;
+  return (utf8decode(bs, s) & ~(value_t)7) | (e - s);
+}
+
+/* Data.Char.isSpace: the ASCII spaces and the Unicode Space_Separator (Zs)
+ * characters. */
+static int
+utf8isspace(value_t c)
+{
+  return c == ' ' || (c >= '\t' && c <= '\r') ||
+         c == 0xa0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200a) ||
+         c == 0x202f || c == 0x205f || c == 0x3000;
+}
+
+/* First byte offset >= i whose character is (if want is 0: is not) a space. */
+static value_t
+utf8skip(struct bytestring bs, value_t i, int want)
+{
+  const uint8_t *p = bs.bs_array;
+  value_t n = bs.bs_size;
+  if (i < 0)
+    i = 0;
+  while (i < n) {
+    if (p[i] < 0x80) {          /* ASCII fast path */
+      if (utf8isspace(p[i]) == want)
+        return i;
+      i++;
+    } else {
+      value_t r = utf8decode(bs, i);
+      if (utf8isspace(r >> 3) == want)
+        return i;
+      i += r & 7;
+    }
+  }
+  return n;
+}
+
+/* Byte offset after the string with trailing spaces removed. */
+static value_t
+utf8trimspaceend(struct bytestring bs)
+{
+  const uint8_t *p = bs.bs_array;
+  value_t e = bs.bs_size;
+  while (e > 0) {
+    if (p[e-1] < 0x80) {
+      if (!utf8isspace(p[e-1]))
+        break;
+      e--;
+    } else {
+      value_t r = utf8decodeend(bs, e);
+      if (!utf8isspace(r >> 3))
+        break;
+      e -= r & 7;
+    }
+  }
+  return e;
+}
+
+/* The characters in reverse order. */
+static struct bytestring
+utf8reverse(struct bytestring bs)
+{
+  struct bytestring r = mk_ro_bytestring(bs.bs_size, NULL);
+  const uint8_t *p = bs.bs_array;
+  uint8_t *q = (uint8_t *)r.bs_array + bs.bs_size;
+  size_t i = 0, n = bs.bs_size;
+  while (i < n) {
+    size_t s = i++;
+    while (i < n && UTF8CONT(p[i]))
+      i++;
+    q -= i - s;
+    memcpy(q, p + s, i - s);
+  }
+  return r;
+}
+
+/* Byte offset of the first occurrence of pat in str at or after i, or -1.
+ * Since UTF-8 is self-synchronizing, a match of a valid encoding always
+ * starts at a character boundary. */
+static value_t
+bsfind(struct bytestring pat, struct bytestring str, value_t i)
+{
+  const uint8_t *p = pat.bs_array, *s = str.bs_array;
+  size_t m = pat.bs_size, n = str.bs_size;
+  if (i < 0)
+    i = 0;
+  if ((size_t)i > n || m > n - i)
+    return -1;
+  if (m == 0)
+    return i;
+  for (const uint8_t *q = s + i, *end = s + (n - m); q <= end; q++) {
+    q = memchr(q, p[0], end - q + 1);
+    if (!q)
+      return -1;
+    if (memcmp(q + 1, p + 1, m - 1) == 0)
+      return q - s;
+  }
+  return -1;
+}
+
+/* Byte offset of the last occurrence of pat in str, or -1.
+ * An empty pattern occurs at the end. */
+static value_t
+bsrfind(struct bytestring pat, struct bytestring str)
+{
+  const uint8_t *p = pat.bs_array, *s = str.bs_array;
+  size_t m = pat.bs_size, n = str.bs_size;
+  if (m > n)
+    return -1;
+  if (m == 0)
+    return n;
+  for (size_t i = n - m + 1; i-- > 0; )
+    if (s[i] == p[0] && memcmp(s + i + 1, p + 1, m - 1) == 0)
+      return i;
+  return -1;
+}
+
+/* 1 if every byte is ASCII, else 0. */
+static value_t
+bsisascii(struct bytestring bs)
+{
+  const uint8_t *p = bs.bs_array;
+  for (size_t i = 0; i < bs.bs_size; i++)
+    if (p[i] >= 0x80)
+      return 0;
+  return 1;
+}
+
+/* ASCII lower case (upper == 0) or upper case (upper != 0). */
+static struct bytestring
+bsasciicase(struct bytestring bs, value_t upper)
+{
+  struct bytestring r = mk_ro_bytestring(bs.bs_size, NULL);
+  const uint8_t *p = bs.bs_array;
+  uint8_t *q = r.bs_array;
+  for (size_t i = 0; i < bs.bs_size; i++) {
+    uint8_t c = p[i];
+    if (upper ? (c >= 'a' && c <= 'z') : (c >= 'A' && c <= 'Z'))
+      c ^= 0x20;
+    q[i] = c;
+  }
+  return r;
 }
 
 /* Evaluate to a Bool */
@@ -5104,6 +5548,57 @@ evalstring(NODEPTR n)
   }
   buf[offs] = 0;                /* in case we use it as a C string */
   return mk_ro_bytestring(offs, buf);
+}
+
+/*
+ * Concatenate a list of ByteStrings with a single copy.
+ * The spine and the elements must already be evaluated (concatBS in
+ * Data.ByteString.Internal does that): evaluating here could yield to
+ * another thread, which restarts the primitive from the beginning.
+ * Without evaluation there is no allocation of nodes, so no GC either.
+ */
+static NODEPTR
+bsconcat_follow(NODEPTR n)
+{
+  while (GETTAG(n) == T_IND)
+    n = GETINDIR(n);
+  return n;
+}
+
+struct bytestring
+bsconcat(NODEPTR list)
+{
+  struct bytestring r;
+  size_t size = 0;
+  uint8_t *q = 0;
+  int pass;
+
+  for (pass = 0; pass < 2; pass++) {
+    NODEPTR n = list, x, e;
+    if (pass == 1) {
+      r = mk_ro_bytestring(size, NULL);
+      q = r.bs_array;
+    }
+    for (;;) {
+      n = bsconcat_follow(n);
+      if (GETTAG(n) == T_K)     /* Nil */
+        break;
+      if (!(GETTAG(n) == T_AP && GETTAG(x = indir(&FUN(n))) == T_AP && GETTAG(indir(&FUN(x))) == T_O))
+        ERR("bsconcat: list not evaluated");
+      e = bsconcat_follow(ARG(x));
+      if (GETTAG(e) != T_FORPTR)
+        ERR("bsconcat: element not evaluated");
+      struct bytestring bs = FORPTR(e)->payload;
+      if (pass == 0) {
+        size += bs.bs_size;
+      } else {
+        memcpy(q, bs.bs_array, bs.bs_size);
+        q += bs.bs_size;
+      }
+      n = ARG(n);
+    }
+  }
+  return r;
 }
 
 struct bytestring
@@ -5875,6 +6370,97 @@ evali(NODEPTR an)
     }
     RET;
 
+    /* Data.Text helpers on one ByteString */
+  case T_UTF8LENGTH:
+  case T_UTF8TRIMSPACEEND:
+  case T_UTF8REVERSE:
+  case T_BSISASCII:
+    CHECK(1);
+    xfp = evalbstr(ARG(TOP(0)));
+    POP(1);
+    n = TOP(-1);
+    switch (tag) {
+    case T_UTF8LENGTH:       SETINT(n, utf8length(xfp->payload)); break;
+    case T_UTF8TRIMSPACEEND: SETINT(n, utf8trimspaceend(xfp->payload)); break;
+    case T_BSISASCII:        SETINT(n, bsisascii(xfp->payload)); break;
+    default:                 SETBSTR(n, mkForPtrFree(utf8reverse(xfp->payload))); break;
+    }
+    RET;
+
+    /* Data.Text helpers on a ByteString and an Int */
+  case T_UTF8OFFSET:
+  case T_UTF8OFFSETEND:
+  case T_UTF8DECODE:
+  case T_UTF8DECODEEND:
+  case T_UTF8SKIPSPACE:
+  case T_UTF8SKIPNONSPACE:
+  case T_BSASCIICASE:
+    CHECK(2);
+    xfp = evalbstr(ARG(TOP(0)));
+    xi = evalint(ARG(TOP(1)));
+    POP(2);
+    n = TOP(-1);
+    switch (tag) {
+    case T_UTF8OFFSET:       SETINT(n, utf8offset(xfp->payload, xi)); break;
+    case T_UTF8OFFSETEND:    SETINT(n, utf8offsetend(xfp->payload, xi)); break;
+    case T_UTF8DECODE:       SETINT(n, utf8decode(xfp->payload, xi)); break;
+    case T_UTF8DECODEEND:    SETINT(n, utf8decodeend(xfp->payload, xi)); break;
+    case T_UTF8SKIPSPACE:    SETINT(n, utf8skip(xfp->payload, xi, 0)); break;
+    case T_UTF8SKIPNONSPACE: SETINT(n, utf8skip(xfp->payload, xi, 1)); break;
+    default:                 SETBSTR(n, mkForPtrFree(bsasciicase(xfp->payload, xi))); break;
+    }
+    RET;
+
+  case T_UTF8OFFSETFROM:
+  case T_UTF8OFFSETENDBEFORE:
+    CHECK(3);
+    {
+      value_t xk;
+      xfp = evalbstr(ARG(TOP(0)));
+      xi = evalint(ARG(TOP(1)));
+      xk = evalint(ARG(TOP(2)));
+      POP(3);
+      n = TOP(-1);
+      if (tag == T_UTF8OFFSETFROM)
+        SETINT(n, utf8offsetfrom(xfp->payload, xi, xk));
+      else
+        SETINT(n, utf8offsetendbefore(xfp->payload, xi, xk));
+    }
+    RET;
+
+  case T_BSFIND:
+    CHECK(3);
+    {
+      struct forptr *pfp = evalbstr(ARG(TOP(0)));
+      struct forptr *sfp = evalbstr(ARG(TOP(1)));
+      xi = evalint(ARG(TOP(2)));
+      POP(3);
+      n = TOP(-1);
+      SETINT(n, bsfind(pfp->payload, sfp->payload, xi));
+    }
+    RET;
+
+  case T_BSCONCAT:
+    CHECK(1);
+    {
+      struct bytestring rb = bsconcat(ARG(TOP(0)));   /* evaluates nothing */
+      POP(1);
+      n = TOP(-1);
+      SETBSTR(n, mkForPtrFree(rb));
+    }
+    RET;
+
+  case T_BSRFIND:
+    CHECK(2);
+    {
+      struct forptr *pfp = evalbstr(ARG(TOP(0)));
+      struct forptr *sfp = evalbstr(ARG(TOP(1)));
+      POP(2);
+      n = TOP(-1);
+      SETINT(n, bsrfind(pfp->payload, sfp->payload));
+    }
+    RET;
+
   case T_BSFROMUTF8:
     if (doing_rnf) RET;
     CHECK(1);
@@ -5971,6 +6557,10 @@ evali(NODEPTR an)
     CHKARG3NP;
     xfp = evalbstr(x);
     xi = evalint(y);
+    if (0xdc80 <= xi && xi <= 0xdcff) {
+      /* Using dc80-dcff to roundtrip bad bytes */
+      bsappbyte(xfp, xi & 0xff);
+    } else {
     if ((xi & 0x1ff800) == 0xd800) {
       /* xi is a surrogate */
       xi = 0xfffd; /* replacement character */
@@ -5992,6 +6582,7 @@ evali(NODEPTR an)
       bsappbyte(xfp, ((xi      ) & 0x3f) | 0x80);
     } else {
       ERR("invalid char");
+    }
     }
     POP(3);
     GOPAIRUNIT;
@@ -6113,7 +6704,7 @@ evali(NODEPTR an)
     GCCHECK(2);
     CHKARG2;
     GOAP2(combIOBIND, x, new_ap(combK, y));
-  case T_IO_LAZYBIND:
+  case T_IO_LAZYBINDST:
     /* Lazy bind, used for the lazy ST monad.
      * DO NOT USE FOR IO, because effects are not guaranteed to happen.
      *   (x `lazyBind` y) z = let w = x z in y (fst w) (snd w)
@@ -6122,6 +6713,16 @@ evali(NODEPTR an)
     CHKARG3;
     w = new_ap(x, z);
     GOAP2(y, new_ap(combFst, w), new_ap(combSnd, w));
+  case T_IO_LAZYBIND:
+    /* Lazy bind, used for unsafeInterleaveIO.
+     *   (x `lazyBind` y) z = let w = x z in y (fst w) (snd w)
+     * since the actual state token doesn't matter we use the more efficient
+     *   (x `lazyBind` y) z = let w = x z in y (fst w) z
+     */
+    GCCHECK(4);
+    CHKARG3;
+    w = new_ap(x, z);
+    GOAP2(y, new_ap(combFst, w), z);
   case T_IO_STRICT:
     CHKARG2;
     /* Force the world argument before executing the IO.
@@ -6154,6 +6755,8 @@ evali(NODEPTR an)
     bfile = (struct BFILE*)evalptr(x);
     gc();                     /* make sure we have room.  GC during parse is dodgy. */
     x = parse_top(bfile, 0);
+    if (x == NIL)
+      raise_rts(exn_deserialize);
     POP(2);
     GOPAIR(x);                /* allocates a cell, but we did a GC above */
 #endif
@@ -6682,8 +7285,10 @@ evali(NODEPTR an)
       case T_SUBR:  SUB_OVERFLOW(value_t, ru, yu, xu); break;
       case T_QUOT:  if (yu == 0)
                       raise_rts(exn_dividebyzero);
+#if WANT_OVERFLOW
                     else if ((value_t)xu == VALUE_MIN && (value_t)yu == -1)
                       raise_rts(exn_overflow);
+#endif
                     else
                       ru = (uvalue_t)((value_t)xu / (value_t)yu);
                     break;
@@ -6746,7 +7351,11 @@ evali(NODEPTR an)
     unint:
       switch (GETTAG(p)) {
       case T_IND:      p = GETINDIR(p); goto unint;
-      case T_NEG:      if ((value_t)xu == VALUE_MIN) raise_rts(exn_overflow); ru = -xu; break;
+      case T_NEG:
+#if WANT_OVERFLOW
+                       if ((value_t)xu == VALUE_MIN) raise_rts(exn_overflow);
+#endif
+                       ru = -xu; break;
       case T_UNEG:     ru = -xu; break;
       case T_INV:      ru = ~xu; break;
       case T_POPCOUNT: ru = POPCOUNT(xu); break;
@@ -7118,6 +7727,8 @@ die_exn(NODEPTR exn)
   /* A horrible hack until we get proper exceptions */
   if (strcmp(msg, "ExitSuccess") == 0) {
     EXIT(0);
+  } else if (strncmp(msg, "ExitFailure ", 12) == 0) {
+    EXIT(atoi(msg + 12));
   } else {
     fprintf(stderr, "\n%s: uncaught exception: %s\n", progname, msg);
     EXIT(1);
@@ -7325,6 +7936,8 @@ MHS_INIT_ARGS(
       ungetb(c, bf);
     }
     prog = parse_top(bf, xffe_table);
+    if (prog == NIL)
+      ERR("deser failed");
     closeb(bf);
   }
 
@@ -7726,6 +8339,10 @@ from_t mhs_openrdmem(int s) { return mhs_from_Ptr(s, 2, openb_rd_mem(mhs_to_Ptr(
 from_t mhs_getmem(int s) { get_mem(mhs_to_Ptr(s, 0), mhs_to_Ptr(s, 1), mhs_to_Ptr(s, 2));  return mhs_from_Unit(s, 3); }
 from_t mhs_readb(int s) { return mhs_from_Int(s, 3, readb(mhs_to_Ptr(s, 0), mhs_to_Int(s, 1), mhs_to_Ptr(s, 2))); }
 from_t mhs_writeb(int s) { return mhs_from_Int(s, 3, writeb(mhs_to_Ptr(s, 0), mhs_to_Int(s, 1), mhs_to_Ptr(s, 2))); }
+from_t mhs_isattyb(int s) { return mhs_from_Int(s, 1, isattyb(mhs_to_Ptr(s, 0))); }
+#if WANT_INT64
+from_t mhs_filesizeb(int s) { return mhs_from_Int64(s, 1, filesizeb(mhs_to_Ptr(s, 0))); }
+#endif  /* WANT_INT64 */
 
 #if WANT_MD5
 from_t mhs_md5Array(int s) { md5Array(mhs_to_Ptr(s, 0), mhs_to_Ptr(s, 1), mhs_to_Int(s, 2)); return mhs_from_Unit(s, 3); }
@@ -7840,6 +8457,7 @@ from_t mhs_mkdir(int s) { return mhs_from_Int(s, 2, MKDIR(mhs_to_Ptr(s, 0), mhs_
 from_t mhs_getcwd(int s) { return mhs_from_Ptr(s, 2, getcwd(mhs_to_Ptr(s, 0), mhs_to_Int(s, 1))); }
 from_t mhs_get_permissions(int s) { return mhs_from_Int(s, 1, get_permissions(mhs_to_Ptr(s, 0))); }
 from_t mhs_set_permissions(int s) { return mhs_from_Int(s, 2, set_permissions(mhs_to_Ptr(s, 0), mhs_to_Int(s, 1))); }
+from_t mhs_get_file_size(int s) { return mhs_from_Int64(s, 1, get_file_size(mhs_to_Ptr(s, 0))); }
 #endif  /* WANT_DIR */
 from_t mhs_getcpu(int s) { GETCPUTIME(mhs_to_Ptr(s, 0), mhs_to_Ptr(s, 1)); return mhs_from_Unit(s, 2); }
 #if WANT_ENV
@@ -8108,6 +8726,10 @@ const struct ffi_entry ffi_table[] = {
   { "get_mem", 3, mhs_getmem},
   { "readb", 3, mhs_readb},
   { "writeb", 3, mhs_writeb},
+  { "isattyb", 1, mhs_isattyb},
+#if WANT_INT64
+  { "filesizeb", 1, mhs_filesizeb},
+#endif  /* WANT_INT64 */
 
 #if WANT_MD5
   { "md5Array", 3, mhs_md5Array},
@@ -8204,6 +8826,7 @@ const struct ffi_entry ffi_table[] = {
   { "getcwd", 2, mhs_getcwd},
   { "set_permissions", 2, mhs_set_permissions},
   { "get_permissions", 1, mhs_get_permissions},
+  { "get_file_size", 1, mhs_get_file_size},
 #endif  /* WANT_DIR */
   { "getcpu", 2, mhs_getcpu},
   { "want_gmp", 0, mhs_want_gmp},
@@ -8392,6 +9015,7 @@ hs_init(int *argc, char **argv[])
 void
 hs_exit(void)
 {
+  extern void _exit(int);       /* XXX why do we need this */
   _exit(0);
 }
 

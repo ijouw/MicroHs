@@ -3,14 +3,14 @@ import qualified Prelude(); import MHSPrelude
 import Data.Char
 import Data.List
 import Data.Maybe
-import Control.Exception
 import MicroHs.Compile
 import MicroHs.CompileCache
 import MicroHs.Desugar(LDef)
+import MicroHs.Error(mhsError, errLoc, formatMhsError)
 import MicroHs.Exp(Exp(Var))
 import MicroHs.Expr(showEType, EModule(..), EDef(..), Expr(EVar))
 import MicroHs.Flags
-import MicroHs.Ident(mkIdent, Ident, unIdent, isIdentChar, SLoc(..), slocIdent, isNoSLoc)
+import MicroHs.Ident(mkIdent, Ident, unIdent, isIdentChar, {-SLoc(..),-} slocIdent, isNoSLoc, unQualString)
 import MicroHs.List
 import MicroHs.Parse
 import MicroHs.StateIO
@@ -42,6 +42,7 @@ data IState = IState {
   isType    :: Bool,
   isColor   :: Bool,
   isPrompt  :: String,
+  isPrompt2 :: String,
   isCComp   :: (Int, TCState, TranslateMap),
   isHistory :: FilePath,
   isErrLine :: Int,
@@ -57,16 +58,17 @@ type I a = StateIO IState a
 
 mainInteractive :: Flags -> [String] -> IO ()
 mainInteractive flags mdls = do
-  putStrLn $ "Welcome to interactive MicroHs, version " ++ showVersion version
-  putStrLn $ "Integer implemented with " ++
-    if wantGMP then "GMP" else if wantImath then "imath" else "Haskell"
+  when (verbosityGT flags (-1)) $ do
+    putStrLn $ "Welcome to interactive MicroHs, version " ++ showVersion version
+    putStrLn $ "Integer implemented with " ++
+      if wantGMP then "GMP" else if wantImath then "imath" else "Haskell"
 {-
   bootTime <- getBootTimeMicro
   now <- getTimeMicro
   putStrLn $ "time=" ++ show (now - bootTime) ++ "us"
 -}
   mhome <- lookupEnv "HOME"
-  let flags' = flags{ loading = True }
+  let flags' = flags{ loading = verbosityGT flags (-1) }
       hist = maybe mhsi (</> mhsi) mhome
       mhsi = ".mhsi"
   _ <- runStateIO startInteractive =<< startIState flags' mdls hist
@@ -93,7 +95,11 @@ startIState flags mdls hist = do
   now <- getTimeMicro
   putStrLn $ "time=" ++ show (now - bootTime) ++ "us"
 -}
-  return $ IState startMdl flags cash noSymbols False False False False "> " (-1, error "tcstate", translateMapEmpty) hist 1 ""
+  return $ IState { isLines = startMdl, isFlags = flags, isCache = cash
+                  , isSymbols = noSymbols, isStats = False, isCompStats = False
+                  , isType = False, isColor = False
+                  , isPrompt = "mhs> ", isPrompt2 = "mhs| ", isCComp = (-1, error "tcstate", translateMapEmpty)
+                  , isHistory = hist, isErrLine = 1, isErrFile = "" }
 
 noSymbols :: Symbols
 noSymbols = (stEmpty, stEmpty)
@@ -118,7 +124,8 @@ startInteractive = do
       line s = oneline s
   rc <- liftIO (catch (lines <$> readFile ".mhsi_rc") (\ (_ :: SomeException) -> return []))
   mapM_ line rc
-  putStrLnI "Type ':quit' to quit, ':help' for help"
+  when (verbosityGT (isFlags is) (-1)) $
+    putStrLnI "Type ':quit' to quit, ':help' for help"
 {-
   liftIO $ do bootTime <- getBootTimeMicro
               now <- getTimeMicro
@@ -126,14 +133,13 @@ startInteractive = do
 -}
   repl
 
-repl :: I ()
-repl = do
+getLineI :: String -> I (Maybe String)
+getLineI prompt = do
   mdls <- gets (cachedModuleNames . isCache)
   syms <- gets isSymbols
   stdinFlag <- gets (useStdin . isFlags)
   hist <- gets isHistory
-  prompt <- gets isPrompt
-  ms <- liftIO $
+  liftIO $
     if stdinFlag then do
       putStr prompt
       hFlush stdout
@@ -144,6 +150,20 @@ repl = do
     else do
       ms <- getInputLineHistComp (return . complete mdls syms) hist prompt
       return (ms <|> Just "")  -- ignore ^D
+
+evalLine :: String -> I ()
+evalLine s = do
+  t1 <- liftIO getTimeMilli
+  oneline s
+  t2 <- liftIO getTimeMilli
+  cstat <- gets isCompStats
+  when cstat $
+    putStrLnI $ "(" ++ show (t2 - t1) ++ "ms compile)"
+
+repl :: I ()
+repl = do
+  prompt <- gets isPrompt
+  ms <- getLineI prompt
   let bye = putStrLnI "Bye"
   case ms of
     Nothing -> bye
@@ -154,13 +174,23 @@ repl = do
           c <- command r
           if c then repl else bye
         _ -> do
-          t1 <- liftIO getTimeMilli
-          oneline s
-          t2 <- liftIO getTimeMilli
-          cstat <- gets isCompStats
-          when cstat $
-            putStrLnI $ "(" ++ show (t2 - t1) ++ "ms compile)"
+          evalLine s
           repl
+
+multiline :: I ()
+multiline = loop []
+  where
+    loop acc = do
+      prompt <- gets isPrompt2
+      ms <- getLineI prompt
+      case ms of
+        Nothing -> return ()
+        Just s
+          | trim s == ":}" ->
+            let blk = unlines (reverse acc)
+            in  unless (all isSpace blk) $ evalLine blk
+          | otherwise -> loop (s : acc)
+    trim = reverse . dropWhile isSpace . reverse . dropWhile isSpace
 
 command :: String -> I Bool
 command s = do
@@ -185,6 +215,10 @@ commands :: [(String, String -> I Bool)]
 commands =
   [ ("quit        quit MicroHs",
      const $ return False
+    )
+  , ("{           start multi-line input (end with :})", const $ do
+      multiline
+      return True
     )
   , ("clear       clear all definitions", const $ do
       updateLines (const preamble)
@@ -251,6 +285,7 @@ setOptions "" = do
   stats <- gets isStats
   compStats <- gets isCompStats
   prompt <- gets isPrompt
+  prompt2 <- gets isPrompt2
   typ <- gets isType
   color <- gets isColor
   flags <- gets isFlags
@@ -261,6 +296,7 @@ setOptions "" = do
   putStrLnI $ "  " ++ (if color     then "+" else "-") ++ "color"
   putStrLnI $ "  path=" ++ intercalate ":" (srcPaths flags)
   putStrLnI $ "  prompt=" ++ prompt
+  putStrLnI $ "  prompt-cont=" ++ prompt2
 setOptions "+s" = do
   modify $ \ is -> is{ isStats = True }
 setOptions "-s" = do
@@ -281,8 +317,10 @@ setOptions ('p':'a':'t':'h':'=':p) =
   modify $ \ is -> is{ isFlags = (isFlags is){ srcPaths = splitColonPath p } }
 setOptions ('p':'r':'o':'m':'p':'t':'=':p) =
   modify $ \ is -> is{ isPrompt = p }
+setOptions ('p':'r':'o':'m':'p':'t':'-':'c':'o':'n':'t':'=':p) =
+  modify $ \ is -> is{ isPrompt2 = p }
 setOptions _ =
-  putStrLnI "Unknown flag.  Known flags: +s, -s, +c, -c, path=PATH, prompt=STR"
+  putStrLnI "Unknown flag.  Known flags: +s, -s, +c, -c, +color, -color, path=PATH, prompt=STR, prompt2=STR"
 
 reload :: I ()
 reload = do
@@ -320,7 +358,7 @@ itIOName = "_itIO"
 
 mkIt :: String -> String
 mkIt l =
-  itName ++ " = " ++ l ++ "\n"
+  itName ++ " =\n" ++ unlines (map ("  " ++) (lines l))
 
 mkItIO :: Flags -> Bool -> String -> String
 mkItIO flgs stats l =
@@ -335,38 +373,45 @@ mkTypeIt l =
   "type " ++ itTypeName ++ " = " ++ l ++ "\n"
 
 err :: SomeException -> I ()
-err e = do
-  let msg = displayException e
-  case parseError msg of
-    Just (f, l) -> modify $ \ is -> is{ isErrFile = f, isErrLine = l }
-    Nothing -> return ()
-  err' msg
-
--- Try to find a file and line number
--- XXX We should have a special exception instead of parsing the message string.
-parseError :: String -> Maybe (FilePath, Int)
-parseError s =
-  case words s of
-    "error:" : ('"' : sfile) : "line" : sline : _ -> do
-      file <- stripSuffix "\":" sfile
-      line <- stripSuffix "," sline >>= readMaybe
-      Just (file, line)
-    _ -> Nothing
+err e =
+  case fromException e of
+    Just e' -> do
+      case errLoc e' of
+        Just loc@(SLoc f l _) | not (isNoSLoc loc) -> modify $ \ is -> is{ isErrFile = f, isErrLine = l }
+        _ -> return ()
+      color <- gets isColor
+      err' $ formatMhsError color e'
+    _  -> err' =<< wrapColor 91 ("*** Exception: " ++ displayException e)
 
 err' :: String -> I ()
-err' s = do
-  s' <- wrapColor 91 ("*** Exception: " ++ s)
-  liftIO $ putStrLn s'
+err' s = liftIO $ putStrLn s
 
 wrapColor :: Int -> String -> I String
 wrapColor c s = do
   color <- gets isColor
   return $ if color then "\ESC[" ++ show c ++ "m" ++ s ++ "\ESC[0m" else s
 
+unindent :: String -> String
+unindent s =
+  let ls = lines s
+      nonEmpty = filter (not . all isSpace) ls
+  in  case nonEmpty of
+        [] -> ""
+        _  ->
+          let n = minimum (map (length . takeWhile (== ' ')) nonEmpty)
+          in  unlines (map (drop n) ls)
+
+stripLet :: String -> Maybe String
+stripLet ('l':'e':'t':r) | null r || isSpace (head r) = Just (unindent ("   " ++ r))
+stripLet _ = Nothing
+
 oneline :: String -> I ()
 oneline aline = do
-  let line = dropWhile isSpace aline
-  ls <- gets isLines
+  let line = unindent aline
+      exprInput =
+        case lines line of
+          [l] -> l
+          ls' -> "{\n" ++ unlines (map ("  " ++) ls') ++ "}"
   stats <- gets isStats
   let def lls = do
         defTest <- tryCompile lls
@@ -377,6 +422,7 @@ oneline aline = do
       expr ln = do
 --        t1 <- liftIO getTimeMilli
         flgs <- gets isFlags
+        ls <- gets isLines
         exprTest <- tryCompile (ls ++ "\n" ++ mkItIO flgs stats ln)
         case exprTest of
           Right (m, _) -> do
@@ -386,21 +432,43 @@ oneline aline = do
             when (stats) $
               liftIO $ putStrLn $ "total " ++ show (t2 - t1) ++ "ms"
 -}
-          Left  e -> err e
+          Left  e -> do
+            case fromException e of
+              Just (MhsUndefError _ _ i) | let u = unQualString i, i /= u -> do
+                -- We have an undefined qualified identifier.
+                -- Add a qualified import for the module (if it doesn't exist),
+                -- if that succeeds, rerun the expression.
+                let mdl = fromJust $ stripSuffix ("." ++ u) i
+                    imp = "import qualified " ++ mdl
+                if imp `elem` lines ls then
+                  -- Already imported
+                  err e
+                 else do
+                  let lls = ls ++ imp ++ "\n"
+                  defTest <- tryCompile lls
+                  case defTest of
+                    Right _ -> do
+                      -- Adding the import succeeded, so try again
+                      updateLines (const lls)
+                      expr ln
+                    Left  _ -> err e
+              _ -> err e
   -- A small hack, if we import something we have already imported
   -- in exactly the same way, we just reload instead.  This is to avoid
   -- building up multiple imports.
-  if take 1 (words line) == ["import"] && line `elem` lines ls then
+  ls <- gets isLines
+  let trimmed = dropWhile isSpace aline
+  if take 1 (words line) == ["import"] && trimmed `elem` lines ls then
     reload
-   else 
+   else
     -- First try to parse as a definition,
-    tryParse pTopModule (ls ++ line ++ "\n") def $ \ _ ->
+    tryParse pTopModule (ls ++ line) def $ \ _ ->
       -- if that fails, parse as an expression.
-      tryParse pExprTop line expr $ \ msg ->
+      tryParse pExprTop exprInput (const $ expr line) $ \ msg ->
         -- finally, try to strip an initial 'let' and parse as a definition
         let emsg = err' msg in
-        case stripPrefix "let " line of
-          Just line' -> tryParse pTopModule (ls ++ line' ++ "\n") def $ const emsg
+        case stripLet line of
+          Just line' -> tryParse pTopModule (ls ++ line') def $ const emsg
           Nothing    -> emsg
 
 tryParse :: forall a . -- Show a =>
@@ -408,7 +476,7 @@ tryParse :: forall a . -- Show a =>
 tryParse p s ok bad =
   case parse p "" s of
     Right _ -> ok s
-    Left  e -> bad e
+    Left  e -> bad (show e)
 
 tryCompile :: String -> I (Either SomeException ([LDef], TCState))
 tryCompile file = trySIO $ compile file
@@ -555,7 +623,9 @@ finds str = do
   (ts, vs) <- gets isSymbols
   let i = mkIdent str
   case stLookup "type" i vs `alt` stLookup "value" i ts of
-    Left s -> putStrLnI s
+    Left s -> do
+      color <- gets isColor
+      putStrLnI $ formatMhsError color s
     Right (Entry (EVar qi) _) | let loc@(SLoc f l _) = slocIdent qi, not (isNoSLoc loc) -> do
       ed <- getEditor
       _ <- liftIO $ system $ printf ed l f

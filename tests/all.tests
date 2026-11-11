@@ -1,0 +1,128 @@
+# Tests to run with Tools/Tester.hs
+# Columns: program expected-stdout expected-stderr stdin mhs-flags
+# Using - for expected-stdout, expected-stderr, or stdin means the empty file.
+# Using = for expected-stdout or expected-stderr means the file program.ref
+# The short form
+#  program
+# corresponds to
+#  program = - - -r
+# i.e., using program.ref as the expected stdout, no error, no input,
+# and -r to run directly.
+
+Hello
+# IOTest        IOTest.ref
+Serdes
+StringTest
+LargeGetLine
+ListTest
+Fac
+Misc
+Case
+Arith
+Arith64
+Guard
+Newtype
+HashOper
+RecordBind
+LitMatch
+Word
+Integer
+Enum
+MutRec
+LocalPoly
+Rank2
+Catch
+DArith
+FArith
+RealFloat
+Infix
+Class
+Eq
+Floating
+Default
+Multi
+Exists
+TypeEq
+Sieve
+Dict
+Symbol
+FunDep
+TypeLits
+View
+IOArray
+ST
+HigherKind
+PolyKind
+Record
+RecordExport
+Deriving
+Unicode
+BindPat
+Read
+ListCompr
+ParseInd
+Infer
+RecMdl
+ForeignPtr
+Array
+Eq1
+Irref
+DfltSig
+Bytestring
+Text
+TextOps
+ByteStringLow
+ImpMet
+MultiIf
+LameCase
+NoForall
+Bang
+MString
+OrPat
+PartRed
+PatSyn
+Coerce
+PatBind
+NumUnder
+LocalFix
+TypeApp
+Do
+Via
+ByteStringIO
+BitCount
+Bounded
+Typeable
+Storable
+StandDer
+# Cpp           Cpp.ref
+Lit
+TypeOp
+Forall
+Block
+Fork
+# Concur        Concur.ref
+MVar
+Delay
+ThrSt
+Throw
+ThrowMVar
+ThrowToSync
+RtsExn
+Mask
+EmptyData
+QualDo
+Weak
+Fix
+Pat
+Logarithms
+Builder
+Unboxed
+LazyST
+Errno
+QualString
+MD5
+Interpolate
+ExtraComma
+InterleaveIO
+DerivingBuiltin  - - -
+-                itest.ref   -   itest.in   --stdin -q

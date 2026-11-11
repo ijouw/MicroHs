@@ -2,7 +2,7 @@ module MicroHs.Fixity(defaultFixity, resolveFixity) where
 import qualified Prelude(); import MHSPrelude
 import MicroHs.Builtin
 import MicroHs.Expr
-import MicroHs.Ident
+--import MicroHs.Ident
 
 -- Operators resolution
 --  Input:  A sequence of binary infix operators, prefix operators, and operands
@@ -62,7 +62,7 @@ negFixity = (AssocLeft, 6)
 resolveFixity :: Expr -> [((Expr, Fixity), Expr)] -> Either (SLoc, String) Expr
 resolveFixity ae oes =
   let inps = expr ae ++ concatMap opexpr oes
-      expr (ENegApp e) = Rator FixPre undefined negFixity : expr e  -- there's only one prefix operator, so undefined is ok
+      expr (ENegApp e) = Rator FixPre e negFixity : expr e  -- there's only one prefix operator, so e is just for location
       expr e = [Rand e]
       opexpr ((f, fx), e) = Rator FixIn f fx : expr e
 

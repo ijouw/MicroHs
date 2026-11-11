@@ -15,6 +15,7 @@ import MicroHs.CompileCache
 import MicroHs.Config
 import MicroHs.Desugar(LDef)
 import MicroHs.EncodeData(encList)
+import MicroHs.Error
 import MicroHs.Exp(Exp(Var, Lit))
 import MicroHs.Expr(Lit(LInt, LForImp, LBStr))
 import MicroHs.ExpPrint
@@ -66,7 +67,7 @@ main = do
         putStrLn $ "flags = " ++ show flags
       preload' <- mapM (findAPackage flags) (preload flags)
       let flags' = flags { preload = preload' }
-      withArgs rargs $
+      withArgs rargs $ reportErrors $
         case () of
           _ | Just p <- listPkg flags'        -> mainListPkg flags' p
           _ | Just p <- buildPkg flags'       -> mainBuildPkg flags' p mdls
@@ -225,14 +226,14 @@ readConfig flags = do
         return []
       Right cfs -> do
         when (verbosityGT flags 1) $
-          putStrLn $ "Read targets file. Possible targets: " ++ show (map fst cfs)
+          putStrLn $ "Read config file " ++ show cfFilePath ++ ". Possible targets: " ++ show (map fst cfs)
         return cfs
 
 findSection :: Flags -> IO [(Key, Value)]
 findSection flags = do
   case lookup (target flags) (config flags) of
     Nothing ->
-      error $ "Cannot find config section: " ++ target flags ++ ", available=" ++ unwords (map fst (config flags))
+      mhsError $ "Cannot find config section: " ++ target flags ++ ", available=" ++ unwords (map fst (config flags))
     Just cs -> do
       when (verbosityGT flags 0) $
         putStrLn $ "Found target: " ++ show (target flags, cs)
@@ -359,7 +360,7 @@ mainCompile flags mn = do
   let
     mainName = qualIdent rmn (mkIdent "main")
     cmdl = (allDefs, if noLink flags then Lit (LInt 0) else Var mainName)
-    (forExps, outCMdl@(outDefs, _)) = renumberCMdl cmdl
+    (forExps, outCMdl@(outDefs, _xxx)) = renumberCMdl cmdl
     outData = toStringCMdl outCMdl
     numOutDefs = length outData
     numDefs = length allDefs
@@ -370,8 +371,8 @@ mainCompile flags mn = do
     putStrLn "linked:"; printLDefs (removeUnused cmdl)
   dumpIf flags Dtoplevel $ do
     putStrLn "toplevel:"; printLDefs allDefs
-  if runIt flags then do
-    translateAndRun cmdl
+  if runIt flags then
+    translateAndRun outCMdl
    else do
     seq (length outData) (return ())
     t2 <- getTimeMilli
@@ -380,7 +381,7 @@ mainCompile flags mn = do
 
     when (speed flags) $ do
       let fns = filter (isSuffixOf ".hs") $ map (slocFile . slocIdent) $ cachedNonPkgModuleNames cash
-      locs <- sum . map (length . lines) <$> mapM readFile fns
+      locs <- fromIntegral . sum . map (length . lines) <$> mapM readFile fns
       putStrLn $ show (locs * 1000 `div` (t2 - t0)) ++ " lines/s"
 
     -- embedPkg are the packages we are embedding in the binary.

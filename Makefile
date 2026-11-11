@@ -83,10 +83,15 @@ bin/mcabal:	$(RTS)/*.c $(RTS)/*.h $(RTS)/*/*.h #generated/mcabal.c
 	@mkdir -p bin
 	$(CCEVAL) generated/mcabal.c $(CCLIBS) -o bin/mcabal
 
-# Compile cpphs from distribution, with C compiler
+# Compile install from distribution, with C compiler
 bin/install:	$(RTS)/*.c $(RTS)/*.h $(RTS)/*/*.h #generated/install.c
 	@mkdir -p bin
 	$(CCEVAL) generated/install.c $(CCLIBS) -o bin/install
+
+# Compile tester from distribution, with C compiler
+bin/tester:	$(RTS)/*.c $(RTS)/*.h $(RTS)/*/*.h #generated/tester.c
+	@mkdir -p bin
+	$(CCEVAL) generated/tester.c $(CCLIBS) -o bin/tester
 
 # Compile combinator evaluator
 bin/mhseval:	$(RTS)/*.c $(RTS)/*.h $(RTS)/*/*.h
@@ -139,6 +144,10 @@ generated/mhs.c:	bin/mhs src/*/*.hs
 generated/install.c:	bin/mhs Tools/Install.hs
 	@mkdir -p generated
 	bin/mhs -z $(MHSINC) -iTools Install -ogenerated/install.c
+
+generated/tester.c:	bin/mhs Tools/Tester.hs
+	@mkdir -p generated
+	bin/mhs -z $(MHSINC) -iTools Tester -ogenerated/tester.c
 
 ghcgen:	bin/gmhs src/*/*.hs lib/*.hs lib/*/*.hs lib/*/*/*.hs
 	bin/gmhs $(MHSINC) $(MAINMODULE) -ogenerated/mhs.c
@@ -197,7 +206,7 @@ runtest:	bin/mhseval bin/gmhs tests/*.hs
 
 # Run test examples with mhs-compiled compiler
 runtestmhs: bin/mhseval bin/mhs
-	cd tests; $(MAKE) MHS=../bin/mhs cache; $(MAKE) MHS="../bin/mhs +RTS -H4M -RTS -CR" alltest interactivetest
+	cd tests; $(MAKE) MHS=../bin/mhs cache; $(MAKE) MHS="../bin/mhs +RTS -H5M -RTS -CR" alltest interactivetest
 
 runitestmhs: bin/mhseval bin/mhs
 	cd tests; $(MAKE) MHS=../bin/mhs cache; $(MAKE) MHS="../bin/mhs +RTS -H4M -RTS -CR" interactivetest
@@ -211,7 +220,7 @@ runtestgsan: bin/mhsevalsane bin/gmhs
 	cd tests; $(MAKE) EVAL="../bin/mhsevalsane +RTS -H1M -RTS" info test errtest
 
 # Run test examples going via JavaScript
-runtestemscripten: bin/mhseval bin/mhs bin/cpphs
+runtestemscripten: bin/mhseval bin/mhs bin/cpphs bin/tester
 	cd tests; $(MAKE) MHS=../bin/mhs cache; MHSDIR=.. $(MAKE) MHSTARGET="-temscripten" MHS="../bin/mhs -CR -oout.js" EVAL="$(NODE) $(NODEFLAGS) out.js" info test errtest testpipenonblockioem testjsflag testjsbits
 
 runtestinstemscripten:
@@ -262,7 +271,7 @@ cachelib:
 
 #
 clean:
-	rm -rf src/*/*.hi src/*/*.o *.comb *.js *.tmp *~ bin/* a.out $(GHCOUTDIR) Tools/*.o Tools/*.hi dist-newstyle generated/*-stage* .mhscache .mhscache dist-mcabal Interactive.hs .mhsi lib/*.pkg lib/dist-mcabal mhs.conf
+	rm -rf src/*/*.hi src/*/*.o *.comb *.js *.tmp *~ bin/* a.out $(GHCOUTDIR) Tools/*.o Tools/*.hi dist-newstyle generated/*-stage* .mhscache .mhscache dist-mcabal Interactive.hs .mhsi lib/*.pkg lib/dist-mcabal mhs.conf *.gcda *.gcno *.profraw
 	cd tests; $(MAKE) clean
 	-cabal clean
 	-git submodule deinit cpphssrc/malcolm-wallace-universe
@@ -281,9 +290,10 @@ oldinstall:
 	@echo "*** Set environment variable MHSDIR to $(PREFIX)/lib/mhs"
 	@echo "***"
 
-everytest:	newmhs bin/cpphs exampletest info runtest cachetest bootcombtest nfibtest
+everytest:	bin/mhs bin/cpphs bin/mhseval bin/tester exampletest cachetest runtest bootstrap nfibtest
 
-everytestmhs:	bin/mhs bin/cpphs bin/mhseval exampletest info cachetest bootstrap runtestmhs nfibtest
+#everytestmhs:	bin/mhs bin/cpphs bin/mhseval exampletest info cachetest bootstrap runtestmhs nfibtest
+everytestmhs:	everytest
 
 bootcombtest:	bin/gmhs bin/mhseval
 	bin/gmhs $(MHSINC) -ogmhs.comb $(MAINMODULE)
@@ -315,8 +325,8 @@ nfibtest: bin/mhs bin/mhseval
 
 ######
 
-VERSION=0.16.9.0
-HVERSION=0,16,9,0
+VERSION=0.16.12.0
+HVERSION=0,16,12,0
 MCABAL=$(HOME)/.mcabal
 MCABALMHS=$(MCABAL)/mhs-$(VERSION)
 MDATA=$(MCABALMHS)/packages/mhs-$(VERSION)/data
@@ -339,6 +349,7 @@ preparedist:	newmhsz bootstrapcpphs
 	rm -f generated/mcabal.c generated/mhseval.js generated/base.pkg
 	$(MAKE) generated/mcabal.c
 	$(MAKE) generated/install.c
+	$(MAKE) generated/tester.c
 	$(MAKE) generated/mhseval.js
 	$(MAKE) generated/base.pkg
 
@@ -374,6 +385,9 @@ oldminstall:	bin/mhs bin/cpphs bin/mcabal machdep
 	@mkdir -p $(MCABALMHS)
 	bin/mhs -Q generated/base.pkg $(MCABALMHS)
 	@echo $$PATH | tr ':' '\012' | grep -q $(MCABALBIN) || echo '***' Add $(MCABALBIN) to the PATH
+
+install-pgo: bin/install
+	bin/install --pgo -i$(MCABAL) GMPFLAGS=$(MHSGMPCCFLAGS) GMPLIBS=$(MHSGMPCCLIBS)
 
 machdep:
 	$(CC) Tools/machdep.c -o machdep.exe && ./machdep.exe > $(RTS)/MachDeps.h && rm machdep.exe
@@ -413,4 +427,9 @@ bin/hmhs: generated/hmhs.c
 	@mkdir -p bin
 	$(CCEVAL) generated/hmhs.c $(CCLIBS) -o bin/hmhs
 
-
+testhugs: newmhs
+	rm -f generated/hmhs.c
+	make bin/hmhs
+	bin/hmhs $(MHSINC) $(MAINMODULE) -ohugs-mhs.comb
+	bin/mhs  $(MHSINC) $(MAINMODULE) -omhs-mhs.comb
+	cmp hugs-mhs.comb mhs-mhs.comb

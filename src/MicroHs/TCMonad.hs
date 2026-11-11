@@ -17,6 +17,7 @@ import MicroHs.Names
 import MicroHs.State
 import MicroHs.SymTab
 import System.IO.Unsafe(unsafePerformIO)
+import Text.PrettyPrint.HughesPJLiteClass
 import Unsafe.Coerce
 import Debug.Trace
 
@@ -76,6 +77,13 @@ data ValueExport = ValueExport
 
 instance NFData ValueExport where
   rnf (ValueExport a b) = rnf a `seq` rnf b
+
+instance Pretty ValueExport where
+  pPrintPrec l _ (ValueExport i (Entry e t)) = pPrintPrec l 0 i <+> text "=" <+> pPrintPrec l 0 e <+> text "::" <+> pPrintPrec l 0 t
+
+instance Pretty TypeExport where
+  pPrintPrec l _ (TypeExport i (Entry e t) vs) =
+    pPrintPrec l 0 i <+> text "=" <+> pPrintPrec l 0 e <+> text "::" <+> pPrintPrec l 0 t <+> pPrintPrec l 0 vs
 
 -----------------------------------------------
 -- Tables
@@ -145,6 +153,12 @@ instance NFData ClassInfo where
 
 -----------------------------------------------
 -- TCState
+-- Where we are while type checking, for error messages.
+data Ctx
+  = CtxExpr Expr             -- checking this literal
+  | CtxBind Ident            -- in the definition of this identifier
+  deriving (Show)
+
 data TCState = TC {
   moduleName  :: IdentModule,           -- current module name
   unique      :: Int,                   -- unique number
@@ -163,7 +177,7 @@ data TCState = TC {
                   ArgDicts              -- dictionary arguments
                  ),
   constraints :: Constraints,           -- constraints that have to be solved
-  defaults    :: Defaults               -- current defaults
+  defaults    :: Defaults              -- current defaults
   }
   deriving (Show)
 
